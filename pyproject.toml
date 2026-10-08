@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-assistant"
+version = "0.1.0"
+description = "一个有记忆的私人助理 Agent（学习项目）"
+requires-python = ">=3.12"
+# 说明：依赖刻意不写在这里，统一由 requirements.txt 管理（因为要按周分批启用）。
+#      安装本包时请用：pip install -e . --no-deps
+
+[tool.setuptools.packages.find]
+# 告诉 setuptools：包在 src 目录下（这叫 src 布局，是 Python 的推荐做法）
+where = ["src"]
+
+[tool.pytest.ini_options]
+# 让 pytest 能找到 src 下的包，不需要额外设置 PYTHONPATH
+pythonpath = ["src"]
+testpaths = ["tests"]
+# -v 显示每个测试的名字；--tb=short 让报错信息更简洁易读
+addopts = "-v --tb=short"

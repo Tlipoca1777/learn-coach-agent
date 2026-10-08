@@ -1,0 +1,21 @@
+# 统一换行符策略
+#
+# 为什么需要这个文件？
+#   Windows 用 CRLF，Linux/macOS 用 LF。如果不管，会出现两种烦人情况：
+#     1. git 每次都警告 "LF will be replaced by CRLF"
+#     2. 同一个人换个系统 clone 下来，git 显示"所有文件都被修改了"
+#        实际上内容一个字都没变，只是换行符不同
+#
+# 策略：仓库里一律存 LF，检出时也保持 LF。
+# 这样跨平台一致，也不会再有 warning。
+* text=auto eol=lf
+
+# 二进制文件不做换行符转换（转换会损坏文件）
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.onnx binary
+*.woff binary
+*.woff2 binary
