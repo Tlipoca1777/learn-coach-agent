@@ -286,54 +286,133 @@ class SummaryMemory:
 
     def add_evicted(self, messages: list[dict]) -> int:
         """把被挤出的消息加入待压缩队列。规格见【S2】。"""
-        raise NotImplementedError("【S2】请实现 add_evicted()")
+        accepted = 0
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content", "")
+            if role == "system" or not isinstance(content, str) or not content.strip():
+                continue
+
+            # 保存副本，避免调用方之后修改消息时改变待压缩内容。
+            self._pending.append(dict(message))
+            accepted += 1
+            message_id = message.get("id")
+            if message_id is not None:
+                self._covered_until = max(self._covered_until, int(message_id))
+        return accepted
 
     def should_compress(self) -> bool:
         """待压缩消息攒够阈值了吗？规格见【S3】。"""
-        raise NotImplementedError("【S3】请实现 should_compress()")
+        return self.pending_tokens >= self.trigger_tokens
 
     def build_compression_prompt(self) -> list[dict]:
         """构造发给模型的 prompt。规格见【S5】。"""
-        raise NotImplementedError("【S5】请实现 build_compression_prompt()")
+        instructions = (
+            f"你是对话摘要器。把下面的对话压缩成不超过 {self.max_summary_tokens} token 的摘要。\n\n"
+            "必须保留：\n"
+            "  - 涉及的人物、地点、时间\n"
+            "  - 用户的偏好、厌恶、习惯\n"
+            "  - 已经做出的决定和承诺\n"
+            "  - 未完成的待办\n\n"
+            "可以丢弃：\n"
+            "  - 寒暄、客套\n"
+            "  - 重复表述\n"
+            "  - 与用户长期信息无关的临时内容"
+        )
+
+        sections: list[str] = []
+        if self.summary:
+            sections.append(
+                "已有摘要（请在此基础上做增量更新，不要丢失其中已有的事实）：\n"
+                f"{self.summary}"
+            )
+
+        conversation = "\n".join(
+            f"{message['role']}: {message['content']}" for message in self._pending
+        )
+        sections.append(f"需要压缩的新对话：\n{conversation}")
+
+        return [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": "\n\n".join(sections)},
+        ]
 
     def compress(self) -> str | None:
         """立刻压缩一次。规格见【S4】【S6】。"""
-        raise NotImplementedError("【S4】请实现 compress()")
+        if not self._pending:
+            return None
+
+        try:
+            raw_summary = self.llm.chat(self.build_compression_prompt())
+            if not isinstance(raw_summary, str) or not raw_summary.strip():
+                raise ValueError("模型返回了空摘要")
+
+            new_summary = raw_summary.strip()
+            if self._token_counter(new_summary) > self.max_summary_tokens:
+                # 为省略号预留空间，找出仍能满足 token 上限的最长前缀。
+                low, high = 0, len(new_summary)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if self._token_counter(new_summary[:middle] + "…") <= self.max_summary_tokens:
+                        low = middle
+                    else:
+                        high = middle - 1
+                new_summary = new_summary[:low].rstrip() + "…"
+
+            self.summary = new_summary
+            self._pending.clear()
+            self.last_error = None
+            return new_summary
+        except Exception as error:
+            # 摘要属于尽力而为的维护任务；失败时保留旧状态供后续重试。
+            self.last_error = error
+            return None
 
     def maybe_compress(self) -> str | None:
         """攒够阈值才压缩。规格见【S7】。"""
-        raise NotImplementedError("【S7】请实现 maybe_compress()")
+        if not self.should_compress():
+            return None
+        return self.compress()
 
     def get_summary(self) -> str | None:
         """返回当前摘要。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 get_summary()")
+        return self.summary
 
     @property
     def covered_until(self) -> int:
         """摘要已覆盖到的最大消息 id。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 covered_until")
+        return self._covered_until
 
     @property
     def pending_tokens(self) -> int:
         """待压缩队列的 token 数。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 pending_tokens")
+        return sum(self._token_counter(message["content"]) for message in self._pending)
 
     @property
     def pending_count(self) -> int:
         """待压缩队列的消息条数。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 pending_count")
+        return len(self._pending)
 
     def clear(self) -> None:
         """清空摘要和队列。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 clear()")
+        self.summary = None
+        self._pending.clear()
+        self._covered_until = 0
+        self.last_error = None
 
     def restore(self, summary: str | None, covered_until: int = 0) -> None:
         """从持久化存储恢复状态。规格见【S9】。"""
-        raise NotImplementedError("【S9】请实现 restore()")
+        self.summary = summary.strip() or None if summary is not None else None
+        self._covered_until = covered_until
 
     def __repr__(self) -> str:
         """调试用的字符串表示。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 __repr__()")
+        summary_tokens = self._token_counter(self.summary) if self.summary else 0
+        return (
+            f"<SummaryMemory 摘要 {summary_tokens} token"
+            f" / 待压缩 {self.pending_count} 条 {self.pending_tokens} token"
+            f" / 阈值 {self.trigger_tokens}>"
+        )
 
 
 # ====================================================================
