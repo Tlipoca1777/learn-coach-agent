@@ -13,18 +13,20 @@
 |---|---|---|---|
 | **D1** | `ShortTermMemory`（滑动窗口 + token 预算） | 19 | ✅ 已完成 |
 | **D2** | `SummaryMemory`（中期递归摘要） | 42 | ✅ 已完成 |
-| D3–D4 | `LongTermMemory`（Chroma + 三因子评分） | 51 | ⏸ 待实现 |
+| **D3** | `LongTermMemory`（集合、事实写入与读取） | 基础用例通过 | ✅ 已完成 |
+| D4 | `LongTermMemory`（三因子评分、去重与失效） | 51 | ⏸ 待实现 |
 | D5 | `FactExtractor`（结构化输出 + 健壮解析） | 57 | ⏸ 待实现 |
 | D6 | 完整记忆链路集成（`python -m memory_assistant`） | — | ⏳ 等待 D3–D5 |
 | D7+ | 工具调用 / LangGraph / 学习教练业务 / 部署 | — | ⏳ |
 
 当前测试基线（2026-10-09）：
 
-- 全量测试：**171 passed，95 failed，4 skipped**（共 270 条）
+- 全量测试：**193 passed，73 failed，4 skipped**（共 270 条）
 - D1 短期记忆：**19/19 通过**
 - D2 中期摘要：**42/42 通过**
+- D3 长期记忆基础层：集合初始化、事实写入、按 ID 读取和基础检索已完成
 - 已就绪基础设施：SQLite 存储 **39/39**、对话引擎 **38/38**、向量层 **20/20**（另有 4 条真实模型慢测默认跳过）
-- 当前失败集中在 D3–D5 的待实现方法，完整记忆链路和 CLI 集成暂未完成
+- 当前失败集中在 D4–D5 的待实现方法，完整记忆链路和 CLI 集成暂未完成
 
 已就绪的基础设施：
 
@@ -118,6 +120,8 @@ python -m venv .venv
 Copy-Item .env.example .env
 #    然后用编辑器打开 .env，填入你的 DEEPSEEK_API_KEY
 #    申请地址：https://platform.deepseek.com/api_keys
+#    默认模型是 deepseek-flash；旧的 deepseek-chat 兼容名目前也会路由到 flash。
+#    如需确认实际路由，运行环境自检，或查看 DeepSeek 后台的用量记录。
 
 # 4. 环境自检（以后遇到任何问题，第一件事就是跑它）
 .\.venv\Scripts\python.exe scripts\check_env.py

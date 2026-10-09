@@ -158,7 +158,9 @@ class Config:
         config = cls(
             api_key=api_key,
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip(),
-            model=os.getenv("LLM_MODEL", "deepseek-chat").strip(),
+            # DeepSeek 已将旧的 `deepseek-chat` 兼容名路由到 flash。
+            # 使用当前公开模型名，避免依赖服务端的隐式别名。
+            model=os.getenv("LLM_MODEL", "deepseek-flash").strip(),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.3")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "2048")),
             context_window=int(os.getenv("LLM_CONTEXT_WINDOW", "64000")),

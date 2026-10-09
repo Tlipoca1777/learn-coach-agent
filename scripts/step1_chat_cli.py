@@ -51,7 +51,7 @@ client = OpenAI(
     api_key=API_KEY,
     base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 )
-MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+MODEL = os.getenv("LLM_MODEL", "deepseek-flash")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 

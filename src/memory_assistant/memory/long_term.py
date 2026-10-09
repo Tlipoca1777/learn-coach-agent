@@ -2,7 +2,7 @@ r"""
 长期记忆 —— 向量库里的结构化事实
 ================================================================
 
-⭐⭐ 这是你的第三个作业。规格写在下面，代码留给你实现。
+⭐⭐ 这是长期记忆模块的规格说明。D3 已实现基础存取能力，D4 继续完成评分、去重与失效管理。
     验收标准在 tests/test_long_term.py。
 
 --------------------------------------------------------------------
@@ -339,8 +339,6 @@ class LongTermMemory:
         half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
         hit_boost: float = DEFAULT_HIT_BOOST,
     ) -> None:
-        # ---- 给你一个开头，剩下的自己写 ----
-
         if not 0.0 < dedup_threshold <= 1.0:
             raise ValueError(f"dedup_threshold 必须在 (0, 1] 之间，收到的是 {dedup_threshold}")
         if half_life_days <= 0:
@@ -354,12 +352,71 @@ class LongTermMemory:
         self.half_life_days = half_life_days
         self.hit_boost = hit_boost
 
-        # TODO: 你需要自己决定下面这些怎么写
-        #   · 怎么按 S1 的约定建/取 Chroma 客户端和集合（注意约束 1 和 3）
-        #   · 怎么把事实在"Python 字典"和"Chroma 的 documents/metadatas"之间转换
-        #     （注意约束 2：metadata 不能放 None）
-        self._client = None
-        self._collection = None
+        import chromadb
+
+        if client is not None:
+            self._client = client
+        elif persist_dir is None:
+            self._client = chromadb.EphemeralClient()
+        else:
+            self._client = chromadb.PersistentClient(path=str(Path(persist_dir)))
+
+        # 不传 embedding_function，避免 Chroma 偷偷启用英文默认模型。
+        # 显式使用 cosine，后续可用 similarity = 1 - distance。
+        self._collection = self._client.get_or_create_collection(
+            name=collection_name,
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+
+    @staticmethod
+    def _metadata_to_fact(fact_id: str, metadata: dict, document: str | None = None) -> dict:
+        """把 Chroma metadata 还原成对外的事实字典。"""
+        source_id = int(metadata.get("source_message_id", -1))
+        return {
+            "id": fact_id,
+            "text": document or metadata.get("text", ""),
+            "subject": metadata.get("subject", ""),
+            "predicate": metadata.get("predicate", ""),
+            "object": metadata.get("object", ""),
+            "user_id": metadata.get("user_id", "default"),
+            "confidence": float(metadata.get("confidence", 1.0)),
+            "source_message_id": None if source_id == -1 else source_id,
+            "created_at": metadata.get("created_at", ""),
+            "updated_at": metadata.get("updated_at", ""),
+            "invalid_at": metadata.get("invalid_at") or None,
+            "hit_count": int(metadata.get("hit_count", 0)),
+            "last_hit_at": metadata.get("last_hit_at") or None,
+        }
+
+    @staticmethod
+    def _fact_metadata(*, subject: str, predicate: str, object: str, user_id: str,
+                       confidence: float, source_message_id: int | None,
+                       created_at: str, updated_at: str, invalid_at: str = "",
+                       hit_count: int = 0, last_hit_at: str = "") -> dict:
+        """Chroma metadata 不接受 None，用 -1 和空字符串表达缺失值。"""
+        return {
+            "subject": subject, "predicate": predicate, "object": object,
+            "user_id": user_id, "confidence": float(confidence),
+            "source_message_id": -1 if source_message_id is None else int(source_message_id),
+            "created_at": created_at, "updated_at": updated_at,
+            "invalid_at": invalid_at, "is_valid": invalid_at == "",
+            "hit_count": int(hit_count), "last_hit_at": last_hit_at,
+        }
+
+    def _all_records(self, *, user_id: str | None = None) -> list[dict]:
+        """读取匹配记录；当前个人项目规模小，优先保持实现直观。"""
+        where = {"user_id": user_id} if user_id is not None else None
+        result = self._collection.get(where=where, include=["metadatas", "documents"])
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        documents = result.get("documents", [])
+        return [
+            self._metadata_to_fact(
+                fact_id, metadatas[index] or {},
+                documents[index] if index < len(documents) else None,
+            )
+            for index, fact_id in enumerate(ids)
+        ]
 
     # ==================================================================
     # 你的任务从这里开始
@@ -376,8 +433,21 @@ class LongTermMemory:
         source_message_id: int | None = None,
         now: datetime | None = None,
     ) -> dict:
-        """添加一条事实（含去重）。规格见【S2】。"""
-        raise NotImplementedError("【S2】请实现 add()")
+        """添加一条事实。D3 完成基础写入；D4 在此基础上加入去重。"""
+        moment = now or utc_now()
+        timestamp = to_iso(moment)
+        text = f"{subject} {predicate} {object}"
+        embedding = self.embedder.embed_documents([text])[0]
+        fact_id = uuid.uuid4().hex
+        metadata = self._fact_metadata(
+            subject=subject, predicate=predicate, object=object, user_id=user_id,
+            confidence=confidence, source_message_id=source_message_id,
+            created_at=timestamp, updated_at=timestamp,
+        )
+        self._collection.add(
+            ids=[fact_id], embeddings=[embedding], documents=[text], metadatas=[metadata]
+        )
+        return {"id": fact_id, "action": "created", "similarity": 0.0}
 
     def search(
         self,
@@ -390,11 +460,38 @@ class LongTermMemory:
         now: datetime | None = None,
     ) -> list[dict]:
         """语义检索。规格见【S3】。"""
-        raise NotImplementedError("【S3】请实现 search()")
+        if top_k <= 0:
+            return []
+        records = self._all_records(user_id=user_id)
+        candidates = [record for record in records if include_invalid or record["invalid_at"] is None]
+        if not candidates:
+            return []
+        query_vector = self.embedder.embed_query(query)
+        raw = self._collection.get(ids=[record["id"] for record in candidates], include=["embeddings"])
+        vectors_by_id = dict(zip(raw["ids"], raw.get("embeddings", [])))
+        norm_q = math.sqrt(sum(float(value) ** 2 for value in query_vector))
+        scored: list[dict] = []
+        for fact in candidates:
+            vector = vectors_by_id.get(fact["id"])
+            if vector is None:
+                continue
+            norm_v = math.sqrt(sum(float(value) ** 2 for value in vector))
+            dot = sum(float(left) * float(right) for left, right in zip(query_vector, vector))
+            similarity = dot / (norm_q * norm_v) if norm_q and norm_v else 0.0
+            similarity = max(0.0, min(1.0, similarity))
+            fact.update({"similarity": similarity, "decay": 1.0, "score": similarity})
+            scored.append(fact)
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return scored[:top_k]
 
     def get(self, fact_id: str) -> dict | None:
         """按 id 取一条事实。规格见【S4】。"""
-        raise NotImplementedError("【S4】请实现 get()")
+        result = self._collection.get(ids=[fact_id], include=["metadatas", "documents"])
+        if not result.get("ids"):
+            return None
+        metadata = (result.get("metadatas") or [{}])[0] or {}
+        document = (result.get("documents") or [None])[0]
+        return self._metadata_to_fact(result["ids"][0], metadata, document)
 
     def invalidate(self, fact_id: str, *, now: datetime | None = None) -> bool:
         """把事实标记为失效。规格见【S5】。"""
@@ -410,15 +507,23 @@ class LongTermMemory:
 
     def count(self, *, user_id: str | None = None, include_invalid: bool = False) -> int:
         """统计事实条数。规格见【S8】。"""
-        raise NotImplementedError("【S8】请实现 count()")
+        records = self._all_records(user_id=user_id)
+        return len(records) if include_invalid else sum(
+            1 for record in records if record["invalid_at"] is None
+        )
 
     def clear(self) -> None:
         """清空所有事实。规格见【S9】。"""
-        raise NotImplementedError("【S9】请实现 clear()")
+        ids = self._collection.get(include=[]).get("ids", [])
+        if ids:
+            self._collection.delete(ids=ids)
 
     def __repr__(self) -> str:
         """规格见【S10】。"""
-        raise NotImplementedError("【S10】请实现 __repr__()")
+        return (
+            f"<LongTermMemory {self.count()} 条事实 / 集合={self.collection_name}"
+            f" / 半衰期={self.half_life_days:g}天>"
+        )
 
 
 # ====================================================================

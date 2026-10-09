@@ -62,7 +62,7 @@ load_dotenv()
 # 第二个参数是「如果没找到，就用这个默认值」。
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")          # 没默认值，没填就必须报错
 BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+MODEL = os.getenv("LLM_MODEL", "deepseek-flash")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 

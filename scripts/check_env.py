@@ -358,9 +358,11 @@ def check_api_call(api_key: str) -> bool:
 
         return check("真实 API 调用", False, f"{error_name}: {error}{hint}")
 
+    actual_model = getattr(llm, "last_response_model", None) or "接口未返回模型名"
     return check(
         "真实 API 调用",
         True,
+        f"请求模型：{config.model}\n实际模型：{actual_model}\n"
         f"模型回答：{answer.strip()}\n本次用量：{llm.last_usage}",
     )
 

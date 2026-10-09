@@ -210,6 +210,9 @@ class DeepSeekClient:
         self.total_usage = Usage()
         # 最近一次调用的用量
         self.last_usage = Usage()
+        # 服务端实际处理请求的模型名。它可能与请求中的别名不同，
+        # 保留它便于核对路由和用量后台。
+        self.last_response_model: str | None = None
 
     # ------------------------------------------------------------------
     def chat(
@@ -220,12 +223,15 @@ class DeepSeekClient:
         max_tokens: int | None = None,
     ) -> str:
         """发一次普通请求（会等模型全部写完才返回）。"""
+        self.last_response_model = None
         response = self._client.chat.completions.create(
             model=self.config.model,
             messages=messages,
             temperature=self.config.temperature if temperature is None else temperature,
             max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
         )
+
+        self.last_response_model = getattr(response, "model", None)
 
         # 记录用量
         if response.usage:
@@ -256,6 +262,7 @@ class DeepSeekClient:
             每次别人取一个值，代码就跑到下一个 yield 然后暂停。
             这就是"边收边显示"的实现原理。
         """
+        self.last_response_model = None
         stream = self._client.chat.completions.create(
             model=self.config.model,
             messages=messages,
@@ -267,6 +274,9 @@ class DeepSeekClient:
         )
 
         for chunk in stream:
+            response_model = getattr(chunk, "model", None)
+            if response_model:
+                self.last_response_model = response_model
             # 坑 1：最后一个 chunk 的 choices 是空列表，只带用量信息
             if not chunk.choices:
                 usage = getattr(chunk, "usage", None)
