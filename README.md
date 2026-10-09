@@ -12,17 +12,24 @@
 | 单元 | 内容 | 测试 | 状态 |
 |---|---|---|---|
 | **D1** | `ShortTermMemory`（滑动窗口 + token 预算） | 19 | ✅ 已完成 |
-| D2 | `SummaryMemory`（中期递归摘要） | 42 | ⏳ |
-| D3–D4 | `LongTermMemory`（Chroma + 三因子评分） | 51 | ⏳ |
-| D5 | `FactExtractor`（结构化输出 + 健壮解析） | 57 | ⏳ |
-| D6 | 集成跑通（`python -m memory_assistant`） | — | ⏳ |
+| D2 | `SummaryMemory`（中期递归摘要） | 42 | ⏸ 待实现 |
+| D3–D4 | `LongTermMemory`（Chroma + 三因子评分） | 51 | ⏸ 待实现 |
+| D5 | `FactExtractor`（结构化输出 + 健壮解析） | 57 | ⏸ 待实现 |
+| D6 | 集成跑通（`python -m memory_assistant`） | — | ⏳ 等待 D2–D5 |
 | D7+ | 工具调用 / LangGraph / 学习教练业务 / 部署 | — | ⏳ |
 
-已就绪的基础设施（**97 个测试全绿**，不需要改动）：
+当前测试基线（2026-10-09）：
+
+- 全量测试：**130 passed，136 failed，4 skipped**（共 270 条）
+- D1 短期记忆：**19/19 通过**
+- 已就绪基础设施：SQLite 存储 **39/39**、对话引擎 **38/38**、向量层 **20/20**（另有 4 条真实模型慢测默认跳过）
+- 当前失败集中在 D2–D5 的待实现方法，完整记忆链路和 CLI 集成暂未完成
+
+已就绪的基础设施：
 
 - 配置管理、DeepSeek 客户端（含离线假模型 `FakeLLM`）、环境自检脚本
 - SQLite 持久化层（`Database` + `Store`）—— 39 个测试
-- 向量层（本地中文 BGE 模型 + 假向量模型）—— 20 个测试
+- 向量层（本地中文 BGE 模型 + 假向量模型）—— 20 个快速测试
 - 对话引擎 + 命令行界面（依赖注入设计，可脱离记忆模块单独测试）—— 38 个测试
 
 > 向量模型的选型有实测数据支撑，见 [记忆架构设计 · 第 12 节](docs/记忆架构设计.md#12-向量模型选型实测记录)
@@ -158,13 +165,12 @@ learn-coach-agent/
 │  │  └─ repositories.py        ←   sessions / messages / summaries 仓储
 │  ├─ memory/                   ← 四层记忆
 │  │  ├─ short_term.py          ←   短期：滑动窗口 + token 预算
-│  │  ├─ summary.py             ←   中期：递归增量摘要
-│  │  ├─ long_term.py           ←   长期：向量库 + 三因子评分
-│  │  ├─ extraction.py          ←   事实抽取（结构化输出 + 健壮解析）
-│  │  └─ profile.py             ←   用户画像（待实现）
+│  │  ├─ summary.py             ←   中期：递归增量摘要（待实现）
+│  │  ├─ long_term.py           ←   长期：向量库 + 三因子评分（待实现）
+│  │  └─ extraction.py          ←   事实抽取（结构化输出 + 健壮解析，待实现）
 │  ├─ engine.py                 ← 对话引擎：把四层记忆串起来
 │  ├─ cli.py / __main__.py      ← 命令行界面
-│  └─ tools/                    ← 工具调用（待实现）
+│  └─ __init__.py               ← 包入口
 ├─ tests/                       ← 共 270 个测试
 │  ├─ test_short_term.py        ←   19
 │  ├─ test_summary.py           ←   42
@@ -184,11 +190,11 @@ learn-coach-agent/
 | 命令 | 作用 |
 |---|---|
 | `/exit` | 退出 |
-| `/reset` | 清空当前会话历史 |
-| `/history` | 查看本次实际发给模型的消息列表 |
-| `/tokens` | 查看累计 token 消耗 |
-| `/memory` | 查看四层记忆状态与 token 配额（阶段 6 实现） |
-| `/forget <关键词>` | 定向删除记忆（阶段 6 实现） |
+| `/status` | 查看会话状态、消息数和 token 占用 |
+| `/memory` | 查看当前注入 prompt 的记忆 |
+| `/help` | 显示命令帮助 |
+| `/forget` | 清空当前会话消息、摘要和长期事实 |
+| `--fake` | 启动离线假模型模式（集成入口会提示尚未实现的记忆模块） |
 
 ---
 
