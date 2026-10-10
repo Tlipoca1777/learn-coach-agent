@@ -175,6 +175,12 @@ class ChatModel(Protocol):
         """发一次请求，一块一块地吐出回答文本。"""
         ...
 
+    def chat_with_tools(
+        self, messages: list[dict], tools: list[dict]
+    ) -> dict:
+        """Return an assistant message, optionally containing tool calls."""
+        ...
+
 
 # ====================================================================
 # 四、真模型客户端
@@ -244,6 +250,43 @@ class DeepSeekClient:
 
         # 注意：content 有可能是 None（比如模型只返回了工具调用），所以要兜底
         return response.choices[0].message.content or ""
+
+    def chat_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Make a non-streaming chat-completions request with function tools."""
+        self.last_response_model = None
+        response = self._client.chat.completions.create(
+            model=self.config.model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+        )
+        self.last_response_model = getattr(response, "model", None)
+        if response.usage:
+            usage = Usage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                requests=1,
+            )
+            self.last_usage = usage
+            self.total_usage.add(usage)
+        message = response.choices[0].message
+        return {
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
+                    },
+                }
+                for call in (message.tool_calls or [])
+            ],
+        }
 
     # ------------------------------------------------------------------
     def stream_chat(
@@ -336,6 +379,7 @@ class FakeLLM:
         reply_fn=None,
         chunk_size: int = 3,
         delay: float = 0.0,
+        tool_responses: list[dict] | None = None,
     ) -> None:
         # 下划线开头的属性是"私有"约定，表示"外面别直接改"
         self._responses = list(responses or [])
@@ -343,6 +387,7 @@ class FakeLLM:
         self._reply_fn = reply_fn
         self._chunk_size = chunk_size
         self._delay = delay
+        self._tool_responses = list(tool_responses or [])
 
         self.calls: list[list[dict]] = []
         self.total_usage = Usage()
@@ -395,6 +440,20 @@ class FakeLLM:
         answer = self._next_response(snapshot)
         self._record_usage(snapshot, answer)
         return answer
+
+    def chat_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Offline tool-call simulation; normal string responses remain supported."""
+        snapshot = [dict(m) for m in messages]
+        if self._tool_responses:
+            response = self._tool_responses.pop(0)
+            self.calls.append(snapshot)
+            content = response.get("content") or ""
+            self._record_usage(snapshot, content)
+            return {"role": "assistant", "content": content,
+                    "tool_calls": list(response.get("tool_calls", []))}
+        answer = self._next_response(snapshot)
+        self._record_usage(snapshot, answer)
+        return {"role": "assistant", "content": answer, "tool_calls": []}
 
     # ------------------------------------------------------------------
     def stream_chat(

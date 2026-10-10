@@ -43,6 +43,13 @@ from memory_assistant.llm import (
     estimate_tokens,
 )
 from memory_assistant.storage import Database, Store, utc_now_iso
+from memory_assistant.tools import (
+    Tool,
+    ToolRegistry,
+    calculate,
+    create_default_tools,
+    get_current_time,
+)
 
 # 第 3 周实现 ShortTermMemory 之后，取消下面这行的注释：
 # from memory_assistant.memory import ShortTermMemory
@@ -67,6 +74,11 @@ __all__ = [
     "FakeEmbeddings",
     "LocalEmbeddings",
     "create_embeddings",
+    "Tool",
+    "ToolRegistry",
+    "calculate",
+    "get_current_time",
+    "create_default_tools",
 ]
 
 __version__ = "0.1.0"

@@ -165,6 +165,8 @@ class ConversationEngine:
         summary=None,
         long_term=None,
         extractor=None,
+        tools=None,
+        max_tool_rounds: int = 5,
     ) -> None:
         self.config = config
         self.session_id = session_id or uuid.uuid4().hex[:12]
@@ -173,6 +175,12 @@ class ConversationEngine:
         self.system_prompt = system_prompt
         self.retrieve_top_k = retrieve_top_k
         self.long_term_token_budget = long_term_token_budget
+        from memory_assistant.tools import create_default_tools
+
+        self.tools = tools if tools is not None else create_default_tools()
+        if max_tool_rounds < 1:
+            raise ValueError("max_tool_rounds must be at least 1")
+        self.max_tool_rounds = max_tool_rounds
 
         self.last_error: Exception | None = None
 
@@ -361,12 +369,16 @@ class ConversationEngine:
         # ---------- 4. 调模型 ----------
         reply = ""
         try:
-            if on_token is not None:
+            if on_token is not None and not hasattr(self.llm, "chat_with_tools"):
                 pieces: list[str] = []
                 for piece in self.llm.stream_chat(result.prompt):
                     pieces.append(piece)
                     on_token(piece)
                 reply = "".join(pieces)
+            elif hasattr(self.llm, "chat_with_tools"):
+                reply = self._chat_with_tools(result.prompt)
+                if on_token is not None:
+                    on_token(reply)
             else:
                 reply = self.llm.chat(result.prompt)
         except Exception as error:
@@ -394,6 +406,35 @@ class ConversationEngine:
         result.extracted_facts = self._extract_and_store(text, reply, message_id)
 
         return result
+
+    def _chat_with_tools(self, prompt: list[dict]) -> str:
+        """Run bounded assistant/tool turns and return the final assistant text."""
+        messages = [dict(message) for message in prompt]
+        schemas = self.tools.schemas()
+        for _ in range(self.max_tool_rounds):
+            response = self.llm.chat_with_tools(messages, schemas)
+            assistant_message = {
+                "role": "assistant",
+                "content": response.get("content") or "",
+            }
+            calls = response.get("tool_calls") or []
+            if not calls:
+                return assistant_message["content"]
+            assistant_message["tool_calls"] = calls
+            messages.append(assistant_message)
+            for call in calls:
+                function = call.get("function") or {}
+                name = function.get("name", "")
+                try:
+                    output = self.tools.execute(name, function.get("arguments", "{}"))
+                except (ValueError, TypeError, ArithmeticError) as error:
+                    output = f"工具执行失败：{error}"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.get("id", ""),
+                    "content": output,
+                })
+        raise RuntimeError(f"工具调用超过上限（{self.max_tool_rounds} 轮）")
 
     # ------------------------------------------------------------------
     # 步骤 2：把挤出去的消息交给摘要层

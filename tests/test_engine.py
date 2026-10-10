@@ -645,6 +645,74 @@ def test_streamed_reply_is_persisted(store):
     assert rows[-1]["content"] == "流式回答"
 
 
+def test_tool_call_is_executed_and_result_returned_to_model(store):
+    llm = FakeLLM(
+        tool_responses=[
+            {
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "calculator", "arguments": '{"expression":"123*456"}'},
+                }]
+            },
+            {"content": "123×456=56088。"},
+        ]
+    )
+    engine = make_engine(store, llm=llm)
+
+    result = engine.respond("123×456 等于多少？")
+
+    assert result.ok
+    assert result.reply == "123×456=56088。"
+    assert llm.call_count == 2
+    assert llm.calls[1][-1] == {
+        "role": "tool", "tool_call_id": "call-1", "content": "56088"
+    }
+
+
+def test_tool_loop_has_a_configured_limit(store):
+    repeated_call = {
+        "tool_calls": [{
+            "id": "loop",
+            "type": "function",
+            "function": {"name": "get_current_time", "arguments": "{}"},
+        }]
+    }
+    llm = FakeLLM(tool_responses=[repeated_call, repeated_call])
+    engine = make_engine(store, llm=llm, max_tool_rounds=2)
+
+    result = engine.respond("现在几点？")
+
+    assert not result.ok
+    assert isinstance(result.error, RuntimeError)
+    assert "超过上限" in str(result.error)
+    assert llm.call_count == 2
+
+
+def test_current_time_tool_result_reaches_final_answer(store):
+    llm = FakeLLM(
+        tool_responses=[
+            {
+                "tool_calls": [{
+                    "id": "time-1",
+                    "type": "function",
+                    "function": {"name": "get_current_time", "arguments": "{}"},
+                }]
+            },
+            {"content": "现在是 2026-10-10 12:34。"},
+        ]
+    )
+    engine = make_engine(store, llm=llm)
+
+    result = engine.respond("现在几点？")
+
+    assert result.ok
+    assert result.reply == "现在是 2026-10-10 12:34。"
+    assert llm.calls[1][-1]["role"] == "tool"
+    assert "T" in llm.calls[1][-1]["content"]
+    assert "+" in llm.calls[1][-1]["content"]
+
+
 # ====================================================================
 # 组 7：错误处理
 # ====================================================================
