@@ -17,7 +17,8 @@
 | **D4** | `LongTermMemory`（三因子评分、去重与失效） | 51 | ✅ 已完成 |
 | **D5** | `FactExtractor`（结构化输出 + 健壮解析） | 57 | ✅ 已完成 |
 | **D6** | 四层记忆集成 + 离线 CLI 验证 | 2 | ✅ 已完成 |
-| D7+ | 工具调用 / LangGraph / 学习教练业务 / 部署 | — | ⏳ |
+| **D7** | 真实模型多轮对话 + 跨会话记忆验证 | live | ✅ 已完成 |
+| D8+ | 工具调用 / LangGraph / 学习教练业务 / 部署 | — | ⏳ |
 
 当前测试基线（2026-10-10）：
 
@@ -30,6 +31,8 @@
 - 已就绪基础设施：SQLite 存储 **39/39**、对话引擎 **38/38**、向量层 **20/20**（另有 4 条真实模型慢测默认跳过）
 - D6 集成验证：真实 SQLite、Chroma、四个记忆模块与对话引擎协同通过；`--fake` 中文 CLI 流程通过
 - `--fake` 使用 FakeLLM + FakeEmbeddings，离线运行但仍走真实记忆写入、检索和摘要路径
+- D7 真实 API 验证：运行 `python scripts/verify_live_memory.py --cache-dir data/models`，会产生模型 API 用量，并将数据写入独立的 `data/d7-live-check`；假向量验证使用独立集合
+- D7 已实测通过：DeepSeek Flash 完成 20 轮对话；真实 BGE embedding 命中长期姓名事实；重建引擎后成功回答姓名
 
 已就绪的基础设施：
 
