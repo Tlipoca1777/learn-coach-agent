@@ -20,11 +20,12 @@
 | **D7** | 真实模型多轮对话 + 跨会话记忆验证 | live | ✅ 已完成 |
 | **D8** | 工具注册框架 + 计算器 / 当前时间 + 有界工具循环 | 15 | ✅ 已完成 |
 | **D9** | 学习记录、掌握度追踪 + 薄弱知识点查询 | 10 | ✅ 已完成 |
-| D10+ | 记忆检索工具 / LangGraph / 间隔复习 / 部署 | — | ⏳ |
+| **D10** | 按需长期记忆检索工具 + 重复调用上限验证 | 7 | ✅ 已完成 |
+| D11+ | LangGraph / 间隔复习 / 部署 | — | ⏳ |
 
 当前测试基线（2026-10-10）：
 
-- 全量测试：**294 passed，4 skipped**（共 298 条）
+- 全量测试：**301 passed，4 skipped**（共 305 条）
 - D1 短期记忆：**19/19 通过**
 - D2 中期摘要：**42/42 通过**
 - D3 长期记忆基础层：集合初始化、事实写入、按 ID 读取和基础检索已完成
@@ -39,6 +40,7 @@
 - D8 的离线验收覆盖计算器 `123*456 = 56088`、模型收到工具结果后生成最终答复，以及“现在几点”触发时间工具；无需 API Key
 - D9 学习教练：schema v1→v2 迁移新增 `topics` / `attempts` / `topic_mastery`；`record_answer` 持久化答题并更新掌握度，`get_weak_topics` 按掌握度返回当前用户的薄弱点；两工具通过引擎和 FakeLLM 完成离线往返验证
 - D9 当前掌握度规则：初始值 0.3；答对按 `(1-mastery)*0.3` 增长，半对按 `(1-mastery)*0.15` 增长，答错减半；低于 0.4 返回为薄弱点。SM-2 和到期复习尚未实现
+- D10 `recall_memory`：模型可在当前上下文没有明确答案时按需搜索长期记忆；`user_id` 由引擎绑定，查询参数校验；FakeLLM 验证工具往返和重复调用触发上限。它补充每轮已有的记忆注入，不替代该检索路径
 
 已就绪的基础设施：
 
@@ -188,13 +190,14 @@ learn-coach-agent/
 │  ├─ engine.py                 ← 对话引擎：把四层记忆串起来
 │  ├─ cli.py / __main__.py      ← 命令行界面
 │  └─ __init__.py               ← 包入口
-├─ tests/                       ← 298 个测试（294 passed，4 skipped）
+├─ tests/                       ← pytest 全量测试
 │  ├─ test_short_term.py        ←   19
 │  ├─ test_summary.py           ←   42
 │  ├─ test_long_term.py         ←   51
 │  ├─ test_extraction.py        ←   57
 │  ├─ test_engine.py            ←   对话、工具往返与用户隔离
 │  ├─ test_learning.py          ←   答题记录、掌握度、弱项查询与迁移
+│  ├─ test_tools.py             ←   工具 schema、参数校验与工具实现
 │  ├─ test_integration.py       ←   2（真实记忆模块 + 离线 CLI）
 │  ├─ test_storage.py           ←   39
 │  └─ test_embeddings.py        ←   24（其中 4 条需设置 RUN_SLOW_TESTS=1）

@@ -41,6 +41,7 @@ import pytest
 
 from memory_assistant.config import Config
 from memory_assistant.engine import (
+    DEFAULT_SYSTEM_PROMPT,
     LONG_TERM_HEADER,
     SUMMARY_HEADER,
     ConversationEngine,
@@ -173,8 +174,14 @@ class StubLongTerm:
         record_hits=True,
         now=None,
     ):
-        self.searches.append({"query": query, "record_hits": record_hits})
-        return [dict(f) for f in list(self.facts.values())[:top_k]]
+        self.searches.append({
+            "query": query, "record_hits": record_hits, "user_id": user_id
+        })
+        return [
+            dict(f)
+            for f in self.facts.values()
+            if f["user_id"] == user_id
+        ][:top_k]
 
     def count(self, *, user_id=None, include_invalid=False) -> int:
         return len(self.facts)
@@ -689,6 +696,74 @@ def test_tool_loop_has_a_configured_limit(store):
     assert llm.call_count == 2
 
 
+def test_recall_memory_tool_returns_fact_to_model(store):
+    long_term = StubLongTerm()
+    long_term.add(
+        "喜欢", "深色主题", subject="user", user_id="alice", confidence=0.95
+    )
+    llm = FakeLLM(
+        tool_responses=[
+            {"tool_calls": [{
+                "id": "recall-1",
+                "type": "function",
+                "function": {
+                    "name": "recall_memory",
+                    "arguments": '{"query":"我的主题偏好"}',
+                },
+            }]},
+            {"content": "你之前说过喜欢深色主题。"},
+        ]
+    )
+    engine = make_engine(store, llm=llm, long_term=long_term, user_id="alice")
+
+    result = engine.respond("我之前说过喜欢什么主题？")
+
+    assert result.ok
+    assert "深色主题" in result.reply
+    assert llm.call_count == 2
+    assert llm.calls[1][-1]["role"] == "tool"
+    assert llm.calls[1][-1]["tool_call_id"] == "recall-1"
+    assert "深色主题" in llm.calls[1][-1]["content"]
+    assert {
+        "query": "我的主题偏好", "record_hits": True, "user_id": "alice"
+    } in long_term.searches
+    assert "recall_memory" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_repeated_recall_calls_stop_at_configured_limit(store):
+    long_term = StubLongTerm()
+    long_term.add("喜欢", "深色主题", user_id="alice")
+    repeated_call = {
+        "tool_calls": [{
+            "id": "recall-loop",
+            "type": "function",
+            "function": {
+                "name": "recall_memory",
+                "arguments": '{"query":"主题偏好"}',
+            },
+        }]
+    }
+    llm = FakeLLM(tool_responses=[repeated_call, repeated_call])
+    engine = make_engine(
+        store, llm=llm, long_term=long_term, user_id="alice", max_tool_rounds=2
+    )
+
+    result = engine.respond("我之前说过喜欢什么主题？")
+
+    assert not result.ok
+    assert isinstance(result.error, RuntimeError)
+    assert "超过上限" in str(result.error)
+    assert llm.call_count == 2
+    recall_searches = [
+        search for search in long_term.searches
+        if search["query"] == "主题偏好" and search["record_hits"]
+    ]
+    assert recall_searches == [
+        {"query": "主题偏好", "record_hits": True, "user_id": "alice"},
+        {"query": "主题偏好", "record_hits": True, "user_id": "alice"},
+    ]
+
+
 def test_current_time_tool_result_reaches_final_answer(store):
     llm = FakeLLM(
         tool_responses=[
@@ -745,7 +820,8 @@ def test_learning_tools_are_available_in_engine_and_scoped_to_user(store):
     assert result.ok
     assert "薄弱点" in result.reply
     assert {schema["function"]["name"] for schema in engine.tools.schemas()} == {
-        "calculator", "get_current_time", "record_answer", "get_weak_topics"
+        "calculator", "get_current_time", "recall_memory",
+        "record_answer", "get_weak_topics"
     }
     assert "python.generator" in llm.calls[2][-1]["content"]
     assert store.learning.get_weak_topics(user_id="alice")[0]["topic_name"] == "python.generator"

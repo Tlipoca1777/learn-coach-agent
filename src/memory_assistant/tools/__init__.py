@@ -1,4 +1,4 @@
-"""Small, dependency-free tool framework and the D8 built-in tools."""
+"""Small, dependency-free tool framework and the built-in tools."""
 
 from __future__ import annotations
 
@@ -193,7 +193,71 @@ def create_learning_tools(repository, *, user_id: str = "default") -> list[Tool]
     ]
 
 
+def create_memory_tools(memory, *, user_id: str = "default") -> list[Tool]:
+    """Build D10 long-term-memory lookup tools bound to one user.
+
+    The model supplies only a query. The application owns the memory object
+    and binds ``user_id`` in the closure, so a tool call cannot read another
+    user's facts by putting a different user id in JSON arguments.
+    """
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("user_id must be a non-empty string")
+
+    def recall_memory(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string")
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise ValueError("top_k must be an integer between 1 and 10")
+        if not 1 <= top_k <= 10:
+            raise ValueError("top_k must be an integer between 1 and 10")
+        facts = memory.search(
+            query.strip(), top_k=top_k, user_id=user_id, record_hits=True
+        )
+        # Keep the model-facing result focused on useful, stable fields.
+        return [
+            {
+                "id": fact["id"],
+                "text": fact["text"],
+                "subject": fact["subject"],
+                "predicate": fact["predicate"],
+                "object": fact["object"],
+                "confidence": fact["confidence"],
+                "score": fact.get("score"),
+            }
+            for fact in facts
+        ]
+
+    return [
+        Tool(
+            name="recall_memory",
+            description=(
+                "Search the user's long-term memory for facts relevant to a query. "
+                "Use this when the user asks what they said or when a specific "
+                "past fact is needed; an empty list means no matching fact was found."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What past fact to look for",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            function=recall_memory,
+        )
+    ]
+
+
 __all__ = [
     "Tool", "ToolRegistry", "calculate", "get_current_time",
-    "create_default_tools", "create_learning_tools",
+    "create_default_tools", "create_learning_tools", "create_memory_tools",
 ]

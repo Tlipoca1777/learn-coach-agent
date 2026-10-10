@@ -104,12 +104,13 @@ from memory_assistant.llm import estimate_tokens, estimate_messages_tokens
 # ====================================================================
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个有记忆的私人助理。你记得用户之前告诉过你的信息。\n"
-    "回答要简洁、具体、有用。如果用户问你他的信息而你的上下文里没有，\n"
-    "就诚实地说你不记得，不要编造。\n"
+    "回答要简洁、具体、有用。如果用户询问个人信息，先检查当前上下文；"
+    "若没有明确答案，按需调用 recall_memory 检索相关过去事实；"
+    "检索仍无结果时，诚实地说你不记得，不要编造。\n"
     "如果用户正在练习知识点，请先清楚说明题目和评分依据；判定用户答案后，"
     "必须调用 record_answer 记录 topic_name、question、user_answer、verdict、score 和反馈。"
     "用户询问薄弱知识点或学习进度时，调用 get_weak_topics 查询后再回答；"
-    "不得声称已记录或查到数据，除非工具已成功返回。"
+    "不得声称已记录或查到数据，除非对应工具已成功返回。"
 )
 
 # prompt 里两段附加内容的小标题
@@ -216,9 +217,15 @@ class ConversationEngine:
             extractor if extractor is not None else self._build_extractor()
         )
         if tools is None:
-            from memory_assistant.tools import create_default_tools, create_learning_tools
+            from memory_assistant.tools import (
+                create_default_tools,
+                create_learning_tools,
+                create_memory_tools,
+            )
 
             self.tools = create_default_tools()
+            for tool in create_memory_tools(self.long_term, user_id=self.user_id):
+                self.tools.register(tool)
             learning_repository = getattr(self.store, "learning", None)
             if learning_repository is not None:
                 for tool in create_learning_tools(

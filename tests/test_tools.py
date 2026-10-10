@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from memory_assistant.tools import (
     ToolRegistry,
     calculate,
     create_default_tools,
+    create_memory_tools,
     get_current_time,
 )
 from memory_assistant.config import Config
@@ -49,6 +51,75 @@ def test_registry_rejects_duplicate_and_unknown_tool():
         registry.register(tool)
     with pytest.raises(ValueError):
         registry.execute("missing", "{}")
+
+
+def test_recall_memory_tool_uses_bound_user_and_returns_relevant_fields():
+    class Memory:
+        calls = []
+
+        def search(self, query, *, top_k, user_id, record_hits):
+            self.calls.append({
+                "query": query,
+                "top_k": top_k,
+                "user_id": user_id,
+                "record_hits": record_hits,
+            })
+            return [{
+                "id": "fact-1",
+                "text": "user 喜欢深色主题",
+                "subject": "user",
+                "predicate": "喜欢",
+                "object": "深色主题",
+                "confidence": 0.95,
+                "score": 0.82,
+                "hit_count": 3,
+            }]
+
+    memory = Memory()
+    tool = create_memory_tools(memory, user_id="alice")[0]
+    registry = ToolRegistry([tool])
+    schema = registry.schemas()[0]["function"]
+
+    result = json.loads(registry.execute(
+        "recall_memory", '{"query":"我的主题偏好","top_k":2}'
+    ))
+
+    assert memory.calls == [{
+        "query": "我的主题偏好",
+        "top_k": 2,
+        "user_id": "alice",
+        "record_hits": True,
+    }]
+    assert result == [{
+        "id": "fact-1",
+        "text": "user 喜欢深色主题",
+        "subject": "user",
+        "predicate": "喜欢",
+        "object": "深色主题",
+        "confidence": 0.95,
+        "score": 0.82,
+    }]
+    assert "user_id" not in schema["parameters"]["properties"]
+    with pytest.raises(TypeError):
+        registry.execute(
+            "recall_memory", '{"query":"偏好","user_id":"bob"}'
+        )
+
+
+@pytest.mark.parametrize("arguments", [
+    '{"query":" "}',
+    '{"query":"偏好","top_k":0}',
+    '{"query":"偏好","top_k":11}',
+    '{"query":"偏好","top_k":true}',
+])
+def test_recall_memory_tool_rejects_invalid_queries_and_limits(arguments):
+    class Memory:
+        def search(self, *args, **kwargs):
+            pytest.fail("invalid input must be rejected before searching")
+
+    registry = ToolRegistry(create_memory_tools(Memory()))
+    with pytest.raises(ValueError):
+        registry.execute("recall_memory", arguments)
 
 
 def test_deepseek_client_sends_tool_schema_and_normalizes_tool_call():
