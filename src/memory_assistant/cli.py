@@ -271,11 +271,44 @@ def main(argv: list[str] | None = None) -> int:
 
     overrides = {}
     if args.fake:
+        import json
+        import re
+
+        from memory_assistant.embeddings import FakeEmbeddings
         from memory_assistant.llm import FakeLLM
+        from memory_assistant.memory import LongTermMemory
+
+        def fake_reply(messages):
+            prompt_text = "\n".join(message.get("content", "") for message in messages)
+            if "信息抽取器" in prompt_text:
+                conversation = prompt_text.split("需要抽取的对话：", 1)[-1]
+                user_lines = re.findall(r"^user: (.*)$", conversation, re.MULTILINE)
+                facts = []
+                patterns = (
+                    (r"我叫([^，。！？\s]+)", "姓名是"),
+                    (r"我住在([^，。！？\s]+)", "住在"),
+                    (r"我喜欢([^，。！？\s]+)", "喜欢"),
+                    (r"我对([^，。！？\s]+?)过敏", "对……过敏"),
+                )
+                for line in user_lines:
+                    for pattern, predicate in patterns:
+                        for value in re.findall(pattern, line):
+                            facts.append({
+                                "subject": "user",
+                                "predicate": predicate,
+                                "object": value,
+                                "confidence": 0.95,
+                                "evidence": line,
+                            })
+                return json.dumps(facts, ensure_ascii=False)
+            if "摘要器" in prompt_text:
+                return "已压缩较早的对话内容。"
+            return "（假模型回答）我记下了。"
 
         print("⚠️ 假模型模式：回答是假的，但记忆行为是真的\n")
-        overrides["llm"] = FakeLLM(
-            default_response="（假模型的回答）我记得你刚才说的话。"
+        overrides["llm"] = FakeLLM(reply_fn=fake_reply)
+        overrides["long_term"] = LongTermMemory(
+            FakeEmbeddings(), persist_dir=config.data_dir / "chroma-fake"
         )
 
     try:
