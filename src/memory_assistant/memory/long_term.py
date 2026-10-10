@@ -2,7 +2,7 @@ r"""
 长期记忆 —— 向量库里的结构化事实
 ================================================================
 
-⭐⭐ 这是长期记忆模块的规格说明。D3 已实现基础存取能力，D4 继续完成评分、去重与失效管理。
+⭐⭐ 这是长期记忆模块的规格说明。D3 已实现基础存取能力，D4 已完成评分、去重与失效管理。
     验收标准在 tests/test_long_term.py。
 
 --------------------------------------------------------------------
@@ -418,6 +418,45 @@ class LongTermMemory:
             for index, fact_id in enumerate(ids)
         ]
 
+    def _update_record(self, fact: dict, **changes) -> None:
+        """只更新一条事实的 metadata，并统一处理 Chroma 的缺失值编码。"""
+        updated = dict(fact)
+        updated.update(changes)
+        metadata = self._fact_metadata(
+            subject=updated["subject"],
+            predicate=updated["predicate"],
+            object=updated["object"],
+            user_id=updated["user_id"],
+            confidence=updated["confidence"],
+            source_message_id=updated["source_message_id"],
+            created_at=updated["created_at"],
+            updated_at=updated["updated_at"],
+            invalid_at=updated.get("invalid_at") or "",
+            hit_count=updated.get("hit_count", 0),
+            last_hit_at=updated.get("last_hit_at") or "",
+        )
+        self._collection.update(ids=[fact["id"]], metadatas=[metadata])
+
+    def _similarities(self, query_vector: list[float], records: list[dict]) -> list[tuple[dict, float]]:
+        """计算查询向量与记录向量的余弦相似度。"""
+        if not records:
+            return []
+        raw = self._collection.get(
+            ids=[record["id"] for record in records], include=["embeddings"]
+        )
+        vectors_by_id = dict(zip(raw.get("ids", []), raw.get("embeddings", [])))
+        norm_q = math.sqrt(sum(float(value) ** 2 for value in query_vector))
+        result: list[tuple[dict, float]] = []
+        for record in records:
+            vector = vectors_by_id.get(record["id"])
+            if vector is None:
+                continue
+            norm_v = math.sqrt(sum(float(value) ** 2 for value in vector))
+            dot = sum(float(left) * float(right) for left, right in zip(query_vector, vector))
+            similarity = dot / (norm_q * norm_v) if norm_q and norm_v else 0.0
+            result.append((record, max(0.0, min(1.0, similarity))))
+        return result
+
     # ==================================================================
     # 你的任务从这里开始
     # ==================================================================
@@ -433,11 +472,36 @@ class LongTermMemory:
         source_message_id: int | None = None,
         now: datetime | None = None,
     ) -> dict:
-        """添加一条事实。D3 完成基础写入；D4 在此基础上加入去重。"""
+        """添加一条事实；有效且足够相似的事实会合并。"""
         moment = now or utc_now()
         timestamp = to_iso(moment)
         text = f"{subject} {predicate} {object}"
         embedding = self.embedder.embed_documents([text])[0]
+
+        # 去重只看同一用户的有效事实，且不能让这次内部检索产生命中副作用。
+        existing = [
+            record for record in self._all_records(user_id=user_id)
+            if record["invalid_at"] is None
+        ]
+        best_record = None
+        best_similarity = 0.0
+        for record, similarity in self._similarities(embedding, existing):
+            if similarity > best_similarity:
+                best_record, best_similarity = record, similarity
+
+        if best_record is not None and best_similarity >= self.dedup_threshold:
+            self._update_record(
+                best_record,
+                confidence=max(float(best_record["confidence"]), float(confidence)),
+                updated_at=timestamp,
+                hit_count=int(best_record["hit_count"]) + 1,
+            )
+            return {
+                "id": best_record["id"],
+                "action": "merged",
+                "similarity": best_similarity,
+            }
+
         fact_id = uuid.uuid4().hex
         metadata = self._fact_metadata(
             subject=subject, predicate=predicate, object=object, user_id=user_id,
@@ -447,7 +511,7 @@ class LongTermMemory:
         self._collection.add(
             ids=[fact_id], embeddings=[embedding], documents=[text], metadatas=[metadata]
         )
-        return {"id": fact_id, "action": "created", "similarity": 0.0}
+        return {"id": fact_id, "action": "created", "similarity": best_similarity}
 
     def search(
         self,
@@ -462,27 +526,40 @@ class LongTermMemory:
         """语义检索。规格见【S3】。"""
         if top_k <= 0:
             return []
+        moment = now or utc_now()
         records = self._all_records(user_id=user_id)
         candidates = [record for record in records if include_invalid or record["invalid_at"] is None]
         if not candidates:
             return []
         query_vector = self.embedder.embed_query(query)
-        raw = self._collection.get(ids=[record["id"] for record in candidates], include=["embeddings"])
-        vectors_by_id = dict(zip(raw["ids"], raw.get("embeddings", [])))
-        norm_q = math.sqrt(sum(float(value) ** 2 for value in query_vector))
         scored: list[dict] = []
-        for fact in candidates:
-            vector = vectors_by_id.get(fact["id"])
-            if vector is None:
-                continue
-            norm_v = math.sqrt(sum(float(value) ** 2 for value in vector))
-            dot = sum(float(left) * float(right) for left, right in zip(query_vector, vector))
-            similarity = dot / (norm_q * norm_v) if norm_q and norm_v else 0.0
-            similarity = max(0.0, min(1.0, similarity))
-            fact.update({"similarity": similarity, "decay": 1.0, "score": similarity})
+        for fact, similarity in self._similarities(query_vector, candidates):
+            reference = fact["last_hit_at"] or fact["created_at"]
+            days = days_between(reference, moment)
+            decay = 0.5 ** (days / self.half_life_days)
+            boost = 1.0 + math.log1p(fact["hit_count"]) * self.hit_boost
+            fact.update({"similarity": similarity, "decay": decay,
+                         "score": similarity * decay * boost})
             scored.append(fact)
         scored.sort(key=lambda item: item["score"], reverse=True)
-        return scored[:top_k]
+        selected = scored[:top_k]
+
+        if record_hits:
+            for fact in selected:
+                new_hit_count = int(fact["hit_count"]) + 1
+                self._update_record(
+                    fact, hit_count=new_hit_count, last_hit_at=to_iso(moment)
+                )
+                fact["hit_count"] = new_hit_count
+                fact["last_hit_at"] = to_iso(moment)
+                # 本次检索使用的是命中前的时间衰减；命中次数的加权则反映
+                # 写回后的值，避免返回结果与实际 hit_count 不一致。
+                fact["score"] = fact["similarity"] * fact["decay"] * (
+                    1.0 + math.log1p(new_hit_count) * self.hit_boost
+                )
+            selected.sort(key=lambda item: item["score"], reverse=True)
+
+        return selected
 
     def get(self, fact_id: str) -> dict | None:
         """按 id 取一条事实。规格见【S4】。"""
@@ -495,15 +572,29 @@ class LongTermMemory:
 
     def invalidate(self, fact_id: str, *, now: datetime | None = None) -> bool:
         """把事实标记为失效。规格见【S5】。"""
-        raise NotImplementedError("【S5】请实现 invalidate()")
+        fact = self.get(fact_id)
+        if fact is None or fact["invalid_at"] is not None:
+            return False
+        self._update_record(
+            fact,
+            invalid_at=to_iso(now or utc_now()),
+            updated_at=to_iso(now or utc_now()),
+        )
+        return True
 
     def delete(self, fact_id: str) -> bool:
         """物理删除一条事实。规格见【S6】。"""
-        raise NotImplementedError("【S6】请实现 delete()")
+        if self.get(fact_id) is None:
+            return False
+        self._collection.delete(ids=[fact_id])
+        return True
 
     def delete_user(self, user_id: str) -> int:
         """删除某个用户的全部事实。规格见【S7】。"""
-        raise NotImplementedError("【S7】请实现 delete_user()")
+        ids = [fact["id"] for fact in self._all_records(user_id=user_id)]
+        if ids:
+            self._collection.delete(ids=ids)
+        return len(ids)
 
     def count(self, *, user_id: str | None = None, include_invalid: bool = False) -> int:
         """统计事实条数。规格见【S8】。"""

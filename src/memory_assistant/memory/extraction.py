@@ -223,6 +223,10 @@ r"""
    这种"逐级降级"的写法在解析不可靠输入时非常常见。
 """
 
+import json
+import math
+import re
+
 from pydantic import BaseModel, Field
 
 
@@ -256,8 +260,7 @@ class ExtractedFact(BaseModel):
     @property
     def text(self) -> str:
         """渲染成 "subject predicate object"，可以直接喂给 LongTermMemory。"""
-        # TODO【S1】请实现
-        raise NotImplementedError("【S1】请实现 text 属性")
+        return f"{self.subject} {self.predicate} {self.object}"
 
     def __str__(self) -> str:
         return f"{self.text}（把握 {self.confidence:.2f}）"
@@ -303,19 +306,158 @@ class FactExtractor:
 
     def build_prompt(self, messages: list[dict], known_facts=None) -> list[dict]:
         """构造 prompt。规格见【S3】。"""
-        raise NotImplementedError("【S3】请实现 build_prompt()")
+        lines = [
+            "你是信息抽取器。从下面的对话里抽取关于用户的**长期有效**的事实。",
+            "",
+            "只抽取长期稳定的信息：",
+            "  - 姓名、职业、所在城市",
+            "  - 偏好、厌恶、习惯",
+            "  - 长期拥有的东西（宠物、设备等）",
+            "  - 过敏、禁忌这类需要长期记住的信息",
+            "",
+            "不要抽取：",
+            '  - 一次性的临时安排（"我明天要开会"）',
+            "  - 寒暄、情绪、对助手的提问",
+            "  - 助手的回答内容（只看用户说了什么）",
+            "",
+            "输出格式：严格的 JSON 数组，不要输出任何其他文字、不要用代码块包裹。",
+            "每个元素包含字段：subject / predicate / object / confidence / evidence",
+            "confidence 是 0 到 1 之间的小数，表示你的把握程度。",
+            "evidence 是原文中支撑这条事实的那句话。",
+            "没有可抽取的内容时，输出 []。",
+        ]
+        if known_facts:
+            lines.extend(["", "已知事实（不要重复抽取）："])
+            lines.extend(f"- {fact}" for fact in known_facts)
+        lines.extend(["", "需要抽取的对话："])
+        lines.extend(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        return [{"role": "user", "content": "\n".join(lines)}]
 
     def parse_response(self, raw: str) -> list[ExtractedFact]:
         """把模型返回的原始文本解析成事实列表。规格见【S4】。这是核心。"""
-        raise NotImplementedError("【S4】请实现 parse_response()")
+        self.last_skipped = 0
+        self.last_error = None
+
+        try:
+            text = str(raw).strip()
+            text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```\s*$", "", text)
+            try:
+                payload = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                payload = self._load_embedded_json(text)
+
+            if isinstance(payload, dict):
+                list_value = next(
+                    (value for value in payload.values() if isinstance(value, list)),
+                    None,
+                )
+                payload = list_value if list_value is not None else [payload]
+            if not isinstance(payload, list):
+                raise ValueError("响应 JSON 顶层必须是数组或对象")
+
+            facts: list[ExtractedFact] = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    self.last_skipped += 1
+                    continue
+                predicate = item.get("predicate")
+                object_value = item.get("object")
+                if not isinstance(predicate, str) or not predicate.strip():
+                    self.last_skipped += 1
+                    continue
+                if not isinstance(object_value, str) or not object_value.strip():
+                    self.last_skipped += 1
+                    continue
+
+                subject = item.get("subject", "user")
+                if not isinstance(subject, str) or not subject.strip():
+                    subject = "user"
+                confidence = item.get("confidence", 1.0)
+                if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                    confidence = 1.0
+                confidence = float(confidence)
+                if not math.isfinite(confidence):
+                    confidence = 1.0
+                if 1.0 < confidence <= 100.0:
+                    confidence /= 100.0
+                confidence = max(0.0, min(1.0, confidence))
+                evidence = item.get("evidence", "")
+                if not isinstance(evidence, str):
+                    evidence = ""
+                try:
+                    facts.append(ExtractedFact(
+                        subject=subject.strip(),
+                        predicate=predicate.strip(),
+                        object=object_value.strip(),
+                        confidence=confidence,
+                        evidence=evidence.strip(),
+                    ))
+                except Exception:
+                    self.last_skipped += 1
+            return facts
+        except Exception as exc:
+            self.last_error = exc
+            self.last_skipped = 0
+            return []
+
+    @staticmethod
+    def _load_embedded_json(text: str):
+        """逐个尝试文本中的 JSON 数组或对象，允许模型在前后加解释。"""
+        decoder = json.JSONDecoder()
+        errors = []
+        for index, char in enumerate(text):
+            if char not in "[{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(text[index:])
+                if isinstance(value, (list, dict)):
+                    return value
+            except json.JSONDecodeError as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[-1]
+        raise ValueError("响应中没有 JSON 数组或对象")
 
     def extract(self, messages: list[dict], *, known_facts=None) -> list[ExtractedFact]:
         """完整抽取流程。规格见【S5】。"""
-        raise NotImplementedError("【S5】请实现 extract()")
+        if not messages:
+            self.last_error = None
+            self.last_skipped = 0
+            return []
+        self.last_error = None
+        self.last_skipped = 0
+        try:
+            raw = self.llm.chat(self.build_prompt(messages, known_facts))
+        except Exception as exc:
+            self.last_error = exc
+            return []
+
+        facts = self.parse_response(raw)
+        best_by_key: dict[tuple[str, str, str], ExtractedFact] = {}
+        for fact in facts:
+            if fact.confidence < self.min_confidence:
+                continue
+            key = tuple(
+                value.strip().casefold()
+                for value in (fact.subject, fact.predicate, fact.object)
+            )
+            previous = best_by_key.get(key)
+            if previous is None or fact.confidence > previous.confidence:
+                best_by_key[key] = fact
+        return sorted(
+            best_by_key.values(), key=lambda fact: fact.confidence, reverse=True
+        )[:self.max_facts]
 
     def __repr__(self) -> str:
         """规格见【S6】。"""
-        raise NotImplementedError("【S6】请实现 __repr__()")
+        return (
+            f"<FactExtractor 最少置信度={self.min_confidence:g} "
+            f"最多={self.max_facts}条>"
+        )
 
 
 # ====================================================================
