@@ -63,6 +63,9 @@ HELP_TEXT = """
   /prompt   查看本次实际发给模型的消息列表
   /forget   忘掉这个会话的一切
   /exit     退出
+
+学习教练：要求模型出一道题并回答后，可问「我有哪些薄弱知识点？」；
+判题记录由 record_answer 保存，查询由 get_weak_topics 完成。
 """
 
 

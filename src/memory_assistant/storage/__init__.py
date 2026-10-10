@@ -26,6 +26,7 @@ from memory_assistant.storage.database import (
 from memory_assistant.storage.repositories import (
     VALID_ROLES,
     MessageRepository,
+    LearningRepository,
     SessionRepository,
     Store,
     SummaryRepository,
@@ -37,6 +38,7 @@ __all__ = [
     "SessionRepository",
     "MessageRepository",
     "SummaryRepository",
+    "LearningRepository",
     "VALID_ROLES",
     "MEMORY_DB",
     "SCHEMA_VERSION",

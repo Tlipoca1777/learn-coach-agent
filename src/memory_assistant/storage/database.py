@@ -66,7 +66,7 @@ MEMORY_DB = ":memory:"
 # 每次修改表结构就 +1，然后在 _migrate() 里写对应的升级逻辑。
 # 为什么需要这个？因为真实项目里数据库是有数据的，
 # 你不能直接删库重建，必须能"平滑升级"。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now_iso() -> str:
@@ -154,6 +154,47 @@ CREATE TABLE IF NOT EXISTS facts (
 
 CREATE INDEX IF NOT EXISTS idx_facts_valid
     ON facts(user_id, invalid_at, expires_at);
+
+-- ============ 学习教练：知识点、答题记录与掌握度 ============
+CREATE TABLE IF NOT EXISTS topics (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    category     TEXT NOT NULL DEFAULT 'general',
+    description  TEXT,
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id     INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL DEFAULT 'default',
+    question     TEXT NOT NULL,
+    user_answer  TEXT NOT NULL,
+    verdict      TEXT NOT NULL CHECK (verdict IN ('correct','partial','wrong')),
+    score        REAL NOT NULL CHECK (score >= 0.0 AND score <= 1.0),
+    feedback     TEXT,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attempts_user_topic
+    ON attempts(user_id, topic_id, id);
+
+CREATE TABLE IF NOT EXISTS topic_mastery (
+    topic_id       INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    user_id        TEXT NOT NULL DEFAULT 'default',
+    mastery        REAL NOT NULL DEFAULT 0.3 CHECK (mastery >= 0.0 AND mastery <= 1.0),
+    attempt_count  INTEGER NOT NULL DEFAULT 0,
+    correct_streak INTEGER NOT NULL DEFAULT 0,
+    interval_days  REAL NOT NULL DEFAULT 1.0,
+    ease           REAL NOT NULL DEFAULT 2.5,
+    due_at         TEXT,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (topic_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_mastery_weak
+    ON topic_mastery(user_id, mastery, topic_id);
 
 -- ============ 用户画像 ============
 CREATE TABLE IF NOT EXISTS profiles (
@@ -266,6 +307,16 @@ class Database:
             return
 
         found = int(row["value"])
+        if found == 1 and SCHEMA_VERSION == 2:
+            # v2 只增加学习教练表；initialize() 已通过 IF NOT EXISTS
+            # 安全创建这些表，因此保留原数据后推进版本号即可。
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                    (str(SCHEMA_VERSION),),
+                )
+            return
+
         if found != SCHEMA_VERSION:
             raise RuntimeError(
                 f"数据库 schema 版本不匹配：数据库是 v{found}，代码期望 v{SCHEMA_VERSION}。\n"

@@ -50,6 +50,7 @@ r"""
         #  {'role': 'assistant', 'content': '你好！'}]
 """
 
+import math
 import uuid
 
 from memory_assistant.storage.database import Database, utc_now_iso
@@ -346,6 +347,152 @@ class SummaryRepository:
         return cursor.rowcount
 
 
+class LearningRepository:
+    """Persist learning topics, answer attempts and per-user mastery."""
+
+    VALID_VERDICTS = frozenset({"correct", "partial", "wrong"})
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def record_answer(
+        self,
+        *,
+        topic_name: str,
+        question: str,
+        user_answer: str,
+        verdict: str,
+        score: float,
+        feedback: str = "",
+        user_id: str = "default",
+    ) -> dict:
+        """Atomically append an attempt and update the topic's mastery score."""
+        topic_name = _required_text(topic_name, "topic_name")
+        question = _required_text(question, "question")
+        user_answer = _required_text(user_answer, "user_answer")
+        user_id = _required_text(user_id, "user_id")
+        if not isinstance(verdict, str):
+            raise ValueError("verdict must be correct, partial, or wrong")
+        verdict = verdict.strip().lower()
+        if verdict not in self.VALID_VERDICTS:
+            raise ValueError("verdict must be correct, partial, or wrong")
+        if isinstance(score, bool):
+            raise ValueError("score must be a number between 0 and 1")
+        try:
+            score = float(score)
+        except (TypeError, ValueError) as error:
+            raise ValueError("score must be a number between 0 and 1") from error
+        if not math.isfinite(score) or not 0 <= score <= 1:
+            raise ValueError("score must be a number between 0 and 1")
+
+        now = utc_now_iso()
+        with self.db.conn:
+            topic = self.db.conn.execute(
+                "SELECT id FROM topics WHERE name = ?", (topic_name,)
+            ).fetchone()
+            if topic is None:
+                cursor = self.db.conn.execute(
+                    "INSERT INTO topics(name, display_name, category, created_at) "
+                    "VALUES(?, ?, 'general', ?)",
+                    (topic_name, topic_name, now),
+                )
+                topic_id = int(cursor.lastrowid)
+            else:
+                topic_id = int(topic["id"])
+
+            mastery_row = self.db.conn.execute(
+                "SELECT * FROM topic_mastery WHERE topic_id = ? AND user_id = ?",
+                (topic_id, user_id),
+            ).fetchone()
+            old_mastery = float(mastery_row["mastery"]) if mastery_row else 0.3
+            old_count = int(mastery_row["attempt_count"]) if mastery_row else 0
+            if verdict == "correct":
+                mastery = old_mastery + (1.0 - old_mastery) * 0.3
+            elif verdict == "partial":
+                mastery = old_mastery + (1.0 - old_mastery) * 0.15
+            else:
+                mastery = old_mastery * 0.5
+
+            self.db.conn.execute(
+                "INSERT INTO attempts(topic_id, user_id, question, user_answer, "
+                "verdict, score, feedback, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (topic_id, user_id, question, user_answer, verdict, score,
+                 _optional_text(feedback, "feedback"), now),
+            )
+            self.db.conn.execute(
+                "INSERT INTO topic_mastery(topic_id, user_id, mastery, attempt_count, updated_at) "
+                "VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(topic_id, user_id) DO UPDATE SET "
+                "mastery=excluded.mastery, attempt_count=excluded.attempt_count, "
+                "updated_at=excluded.updated_at",
+                (topic_id, user_id, mastery, old_count + 1, now),
+            )
+
+        return {
+            "topic_name": topic_name,
+            "mastery": round(mastery, 4),
+            "attempt_count": old_count + 1,
+            "status": _mastery_status(mastery),
+        }
+
+    def get_weak_topics(self, *, limit: int = 5, user_id: str = "default") -> list[dict]:
+        """Return a user's lowest-mastery topics first, with latest feedback."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer between 1 and 50")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError) as error:
+            raise ValueError("limit must be an integer between 1 and 50") from error
+        if not 1 <= limit <= 50:
+            raise ValueError("limit must be an integer between 1 and 50")
+        user_id = _required_text(user_id, "user_id")
+        rows = self.db.conn.execute(
+            "SELECT t.name AS topic_name, t.display_name, t.category, "
+            "m.mastery, m.attempt_count, "
+            "(SELECT a.feedback FROM attempts a WHERE a.topic_id=t.id AND a.user_id=m.user_id "
+            "ORDER BY a.id DESC LIMIT 1) AS latest_feedback "
+            "FROM topic_mastery m JOIN topics t ON t.id=m.topic_id "
+            "WHERE m.user_id = ? AND m.mastery < 0.4 "
+            "ORDER BY m.mastery ASC, m.attempt_count DESC, t.name ASC "
+            "LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [
+            {
+                "topic_name": row["topic_name"],
+                "display_name": row["display_name"],
+                "category": row["category"],
+                "mastery": round(float(row["mastery"]), 4),
+                "attempt_count": int(row["attempt_count"]),
+                "status": _mastery_status(float(row["mastery"])),
+                "latest_feedback": row["latest_feedback"],
+            }
+            for row in rows
+        ]
+
+
+def _required_text(value: str, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_text(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    return value.strip() or None
+
+
+def _mastery_status(mastery: float) -> str:
+    if mastery < 0.4:
+        return "weak"
+    if mastery < 0.8:
+        return "learning"
+    return "mastered"
+
+
 # ====================================================================
 # 把三个仓储打包，方便使用
 # ====================================================================
@@ -371,6 +518,7 @@ class Store:
         self.sessions = SessionRepository(db)
         self.messages = MessageRepository(db)
         self.summaries = SummaryRepository(db)
+        self.learning = LearningRepository(db)
         # TODO（第 5 周）：facts 仓储（需要配合 Chroma 向量库）
         # TODO（第 10 周）：profiles 仓储（用户画像）
 

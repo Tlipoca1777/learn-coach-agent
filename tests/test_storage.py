@@ -79,6 +79,9 @@ def test_initialize_creates_all_tables(db):
         "facts",
         "profiles",
         "llm_calls",
+        "topics",
+        "attempts",
+        "topic_mastery",
         "meta",
     }
     assert expected.issubset(set(db.table_names()))

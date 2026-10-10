@@ -48,6 +48,7 @@ from memory_assistant.tools import (
     ToolRegistry,
     calculate,
     create_default_tools,
+    create_learning_tools,
     get_current_time,
 )
 
@@ -79,6 +80,7 @@ __all__ = [
     "calculate",
     "get_current_time",
     "create_default_tools",
+    "create_learning_tools",
 ]
 
 __version__ = "0.1.0"

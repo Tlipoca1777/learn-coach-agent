@@ -72,6 +72,7 @@ r"""
 --------------------------------------------------------------------
     from memory_assistant.config import Config
     from memory_assistant.engine import ConversationEngine
+    from memory_assistant.tools import create_default_tools
 
     config = Config.from_env()
     engine = ConversationEngine(config)
@@ -80,6 +81,7 @@ r"""
     result = engine.respond("我叫小明，在杭州做后端开发")
     print(result.reply)
     print(result.budget)          # 各部分 token 占用
+    # 默认还提供 calculator / get_current_time / record_answer / get_weak_topics 工具
 
     或者流式：
     engine.respond("你好", on_token=lambda piece: print(piece, end="", flush=True))
@@ -103,7 +105,11 @@ from memory_assistant.llm import estimate_tokens, estimate_messages_tokens
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个有记忆的私人助理。你记得用户之前告诉过你的信息。\n"
     "回答要简洁、具体、有用。如果用户问你他的信息而你的上下文里没有，\n"
-    "就诚实地说你不记得，不要编造。"
+    "就诚实地说你不记得，不要编造。\n"
+    "如果用户正在练习知识点，请先清楚说明题目和评分依据；判定用户答案后，"
+    "必须调用 record_answer 记录 topic_name、question、user_answer、verdict、score 和反馈。"
+    "用户询问薄弱知识点或学习进度时，调用 get_weak_topics 查询后再回答；"
+    "不得声称已记录或查到数据，除非工具已成功返回。"
 )
 
 # prompt 里两段附加内容的小标题
@@ -175,9 +181,6 @@ class ConversationEngine:
         self.system_prompt = system_prompt
         self.retrieve_top_k = retrieve_top_k
         self.long_term_token_budget = long_term_token_budget
-        from memory_assistant.tools import create_default_tools
-
-        self.tools = tools if tools is not None else create_default_tools()
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be at least 1")
         self.max_tool_rounds = max_tool_rounds
@@ -212,6 +215,18 @@ class ConversationEngine:
         self.extractor = (
             extractor if extractor is not None else self._build_extractor()
         )
+        if tools is None:
+            from memory_assistant.tools import create_default_tools, create_learning_tools
+
+            self.tools = create_default_tools()
+            learning_repository = getattr(self.store, "learning", None)
+            if learning_repository is not None:
+                for tool in create_learning_tools(
+                    learning_repository, user_id=self.user_id
+                ):
+                    self.tools.register(tool)
+        else:
+            self.tools = tools
 
     # ------------------------------------------------------------------
     # 按配置创建各个部件
@@ -390,6 +405,9 @@ class ConversationEngine:
                 return result
 
         reply = (reply or "").strip()
+        if result.error is not None and reply:
+            self.last_error = result.error
+            return result
         result.reply = reply
 
         # ---------- 5. 回答落库 ----------

@@ -713,6 +713,45 @@ def test_current_time_tool_result_reaches_final_answer(store):
     assert "+" in llm.calls[1][-1]["content"]
 
 
+def test_learning_tools_are_available_in_engine_and_scoped_to_user(store):
+    llm = FakeLLM(
+        tool_responses=[
+            {"tool_calls": [{
+                "id": "record-1",
+                "type": "function",
+                "function": {
+                    "name": "record_answer",
+                    "arguments": (
+                        '{"topic_name":"python.generator",'
+                        '"question":"yield 是什么？",'
+                        '"user_answer":"不知道",'
+                        '"verdict":"wrong","score":0,'
+                        '"feedback":"回忆它如何暂停函数。"}'
+                    ),
+                },
+            }]},
+            {"tool_calls": [{
+                "id": "weak-1",
+                "type": "function",
+                "function": {"name": "get_weak_topics", "arguments": "{}"},
+            }]},
+            {"content": "我记录了你的回答，生成器与 yield 是目前的薄弱点。"},
+        ]
+    )
+    engine = make_engine(store, llm=llm, user_id="alice")
+
+    result = engine.respond("我答错了生成器题，请记录并告诉我薄弱点。")
+
+    assert result.ok
+    assert "薄弱点" in result.reply
+    assert {schema["function"]["name"] for schema in engine.tools.schemas()} == {
+        "calculator", "get_current_time", "record_answer", "get_weak_topics"
+    }
+    assert "python.generator" in llm.calls[2][-1]["content"]
+    assert store.learning.get_weak_topics(user_id="alice")[0]["topic_name"] == "python.generator"
+    assert store.learning.get_weak_topics(user_id="bob") == []
+
+
 # ====================================================================
 # 组 7：错误处理
 # ====================================================================

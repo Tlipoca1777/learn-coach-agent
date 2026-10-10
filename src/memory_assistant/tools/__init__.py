@@ -144,4 +144,56 @@ def create_default_tools(*, clock: Callable[[], datetime] | None = None) -> Tool
     )
 
 
-__all__ = ["Tool", "ToolRegistry", "calculate", "get_current_time", "create_default_tools"]
+def create_learning_tools(repository, *, user_id: str = "default") -> list[Tool]:
+    """Build D9 study-coach tools bound to one user's learning repository."""
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("user_id must be a non-empty string")
+
+    return [
+        Tool(
+            name="record_answer",
+            description=(
+                "Record a judged quiz answer and update mastery for the current user. "
+                "Call this after evaluating the user's answer."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "topic_name": {"type": "string", "description": "Stable topic key, e.g. python.generator"},
+                    "question": {"type": "string"},
+                    "user_answer": {"type": "string"},
+                    "verdict": {"type": "string", "enum": ["correct", "partial", "wrong"]},
+                    "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    "feedback": {"type": "string", "description": "Brief reason or next-step hint"},
+                },
+                "required": ["topic_name", "question", "user_answer", "verdict", "score"],
+                "additionalProperties": False,
+            },
+            function=lambda **answer: repository.record_answer(
+                **answer, user_id=user_id
+            ),
+        ),
+        Tool(
+            name="get_weak_topics",
+            description=(
+                "List this user's lowest-mastery topics first, including mastery and "
+                "the latest feedback, to choose what to practice next."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}
+                },
+                "additionalProperties": False,
+            },
+            function=lambda limit=5: repository.get_weak_topics(
+                limit=limit, user_id=user_id
+            ),
+        ),
+    ]
+
+
+__all__ = [
+    "Tool", "ToolRegistry", "calculate", "get_current_time",
+    "create_default_tools", "create_learning_tools",
+]
