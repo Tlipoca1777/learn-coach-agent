@@ -62,12 +62,13 @@ HELP_TEXT = """
   /status   会话状态（消息数、摘要、覆盖位置、事实条数、token 占用）
   /user <id> 切换当前用户及其会话、记忆
   /memory   查看当前注入 prompt 的全部记忆
+  /due      查看当前用户到期待复习的知识点
   /prompt   查看本次实际发给模型的消息列表
   /forget   删除当前用户的事实和画像，并清空当前会话消息与摘要
   /exit     退出
 
 学习教练：要求模型出一道题并回答后，可问「我有哪些薄弱知识点？」；
-判题记录由 record_answer 保存，查询由 get_weak_topics 完成。
+判题记录由 record_answer 保存，查询由 get_weak_topics / get_due_reviews 完成。
 """
 
 
@@ -251,6 +252,22 @@ def print_prompt(result) -> None:
     print()
 
 
+def print_due_reviews(engine) -> None:
+    """Print the current user's topics whose scheduled review is due."""
+    topics = engine.store.learning.get_due_reviews(user_id=engine.user_id)
+    print("\n到期待复习的知识点：")
+    if not topics:
+        print("  （暂无）\n")
+        return
+    for topic in topics:
+        print(
+            f"  · {topic['display_name']}"
+            f"（掌握度 {topic['mastery']:.3f}，逾期 {topic['overdue_days']:.1f} 天，"
+            f"下次时间 {topic['due_at']}）"
+        )
+    print()
+
+
 # ====================================================================
 # 主流程
 # ====================================================================
@@ -392,6 +409,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if user_input == "/memory":
             print_memory(engine)
+            continue
+
+        if user_input == "/due":
+            print_due_reviews(engine)
             continue
 
         if user_input == "/forget":

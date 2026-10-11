@@ -53,6 +53,7 @@ r"""
 import math
 import json
 import uuid
+from collections.abc import Callable
 
 from memory_assistant.storage.database import Database, utc_now_iso
 
@@ -431,8 +432,9 @@ class LearningRepository:
 
     VALID_VERDICTS = frozenset({"correct", "partial", "wrong"})
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, *, clock: Callable[[], str] = utc_now_iso) -> None:
         self.db = db
+        self._clock = clock
 
     def record_answer(
         self,
@@ -464,7 +466,7 @@ class LearningRepository:
         if not math.isfinite(score) or not 0 <= score <= 1:
             raise ValueError("score must be a number between 0 and 1")
 
-        now = utc_now_iso()
+        now = self._clock()
         with self.db.conn:
             topic = self.db.conn.execute(
                 "SELECT id FROM topics WHERE name = ?", (topic_name,)
@@ -485,12 +487,35 @@ class LearningRepository:
             ).fetchone()
             old_mastery = float(mastery_row["mastery"]) if mastery_row else 0.3
             old_count = int(mastery_row["attempt_count"]) if mastery_row else 0
+            old_streak = int(mastery_row["correct_streak"]) if mastery_row else 0
+            old_interval = float(mastery_row["interval_days"]) if mastery_row else 1.0
+            old_ease = float(mastery_row["ease"]) if mastery_row else 2.5
             if verdict == "correct":
                 mastery = old_mastery + (1.0 - old_mastery) * 0.3
+                correct_streak = old_streak + 1
+                if correct_streak == 1:
+                    interval_days = 1.0
+                elif correct_streak == 2:
+                    interval_days = 3.0
+                else:
+                    interval_days = old_interval * old_ease
+                ease = min(3.0, old_ease + 0.1)
             elif verdict == "partial":
                 mastery = old_mastery + (1.0 - old_mastery) * 0.15
+                correct_streak = 0
+                interval_days = 1.0
+                ease = max(1.3, old_ease - 0.2)
             else:
                 mastery = old_mastery * 0.5
+                correct_streak = 0
+                interval_days = 1.0
+                ease = max(1.3, old_ease - 0.2)
+
+            from datetime import datetime, timedelta
+
+            due_at = (
+                datetime.fromisoformat(now) + timedelta(days=interval_days)
+            ).isoformat(timespec="seconds")
 
             self.db.conn.execute(
                 "INSERT INTO attempts(topic_id, user_id, question, user_answer, "
@@ -499,12 +524,16 @@ class LearningRepository:
                  _optional_text(feedback, "feedback"), now),
             )
             self.db.conn.execute(
-                "INSERT INTO topic_mastery(topic_id, user_id, mastery, attempt_count, updated_at) "
-                "VALUES(?, ?, ?, ?, ?) "
+                "INSERT INTO topic_mastery(topic_id, user_id, mastery, attempt_count, "
+                "correct_streak, interval_days, ease, due_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(topic_id, user_id) DO UPDATE SET "
                 "mastery=excluded.mastery, attempt_count=excluded.attempt_count, "
+                "correct_streak=excluded.correct_streak, interval_days=excluded.interval_days, "
+                "ease=excluded.ease, due_at=excluded.due_at, "
                 "updated_at=excluded.updated_at",
-                (topic_id, user_id, mastery, old_count + 1, now),
+                (topic_id, user_id, mastery, old_count + 1, correct_streak,
+                 interval_days, ease, due_at, now),
             )
 
         return {
@@ -548,6 +577,42 @@ class LearningRepository:
             }
             for row in rows
         ]
+
+    def get_due_reviews(self, *, limit: int = 10, user_id: str = "default") -> list[dict]:
+        """Return this user's topics whose next review time has arrived."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+            raise ValueError("limit must be an integer between 1 and 50")
+        user_id = _required_text(user_id, "user_id")
+        now = self._clock()
+        from datetime import datetime
+
+        now_dt = datetime.fromisoformat(now)
+        rows = self.db.conn.execute(
+            "SELECT t.name AS topic_name, t.display_name, t.category, m.mastery, "
+            "m.attempt_count, m.correct_streak, m.interval_days, m.ease, m.due_at "
+            "FROM topic_mastery m JOIN topics t ON t.id=m.topic_id "
+            "WHERE m.user_id = ? AND m.due_at IS NOT NULL AND m.due_at <= ? "
+            "ORDER BY m.due_at ASC, m.mastery ASC, t.name ASC LIMIT ?",
+            (user_id, now, limit),
+        ).fetchall()
+        result = []
+        for row in rows:
+            due_dt = datetime.fromisoformat(row["due_at"])
+            overdue_days = max(0.0, (now_dt - due_dt).total_seconds() / 86400)
+            result.append({
+                "topic_name": row["topic_name"],
+                "display_name": row["display_name"],
+                "category": row["category"],
+                "mastery": round(float(row["mastery"]), 4),
+                "attempt_count": int(row["attempt_count"]),
+                "correct_streak": int(row["correct_streak"]),
+                "interval_days": round(float(row["interval_days"]), 4),
+                "ease": round(float(row["ease"]), 4),
+                "due_at": row["due_at"],
+                "overdue_days": round(overdue_days, 4),
+                "status": _mastery_status(float(row["mastery"])),
+            })
+        return result
 
 
 def _required_text(value: str, name: str) -> str:

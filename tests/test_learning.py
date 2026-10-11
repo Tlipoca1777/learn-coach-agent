@@ -1,8 +1,10 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from memory_assistant.storage import Database, SCHEMA_VERSION, Store
+from memory_assistant.cli import print_due_reviews
+from memory_assistant.storage import Database, LearningRepository, SCHEMA_VERSION, Store
 from memory_assistant.tools import ToolRegistry, create_learning_tools
 
 
@@ -139,6 +141,80 @@ def test_learning_tools_call_repository_with_bound_user(store):
     assert "user_id" not in names["record_answer"]["properties"]
     assert "user_id" not in names["get_weak_topics"]["properties"]
     assert store.learning.get_weak_topics(user_id="default") == []
+
+
+def test_due_reviews_use_simplified_sm2_and_user_scope(store):
+    current = ["2026-01-01T00:00:00+00:00"]
+    learning = LearningRepository(store.db, clock=lambda: current[0])
+
+    answer = dict(
+        topic_name="python.generators", question="q", user_answer="a",
+        verdict="correct", score=1, user_id="alice",
+    )
+    first = learning.record_answer(**answer)
+    assert first["attempt_count"] == 1
+    row = store.db.conn.execute(
+        "SELECT correct_streak, interval_days, ease, due_at FROM topic_mastery "
+        "WHERE user_id='alice'"
+    ).fetchone()
+    assert (row["correct_streak"], row["interval_days"], row["ease"]) == (1, 1.0, 2.6)
+    assert row["due_at"] == "2026-01-02T00:00:00+00:00"
+    assert learning.get_due_reviews(user_id="alice") == []
+
+    current[0] = "2026-01-02T00:00:00+00:00"
+    assert [item["topic_name"] for item in learning.get_due_reviews(user_id="alice")] == [
+        "python.generators"
+    ]
+    learning.record_answer(**answer)
+    row = store.db.conn.execute(
+        "SELECT correct_streak, interval_days, ease FROM topic_mastery WHERE user_id='alice'"
+    ).fetchone()
+    assert (row["correct_streak"], row["interval_days"], row["ease"]) == (2, 3.0, 2.7)
+    assert learning.get_due_reviews(user_id="bob") == []
+
+
+def test_wrong_answer_resets_interval_and_ease(store):
+    current = ["2026-01-01T00:00:00+00:00"]
+    learning = LearningRepository(store.db, clock=lambda: current[0])
+    values = dict(
+        topic_name="python.types", question="q", user_answer="a",
+        verdict="correct", score=1, user_id="alice",
+    )
+    learning.record_answer(**values)
+    current[0] = "2026-01-02T00:00:00+00:00"
+    learning.record_answer(**values)
+    current[0] = "2026-01-05T00:00:00+00:00"
+    learning.record_answer(**{**values, "verdict": "wrong", "score": 0})
+    row = store.db.conn.execute(
+        "SELECT correct_streak, interval_days, ease, due_at FROM topic_mastery WHERE user_id='alice'"
+    ).fetchone()
+    assert (row["correct_streak"], row["interval_days"], row["ease"]) == (0, 1.0, 2.5)
+    assert row["due_at"] == "2026-01-06T00:00:00+00:00"
+
+
+def test_due_command_displays_the_current_users_due_topics(capsys):
+    calls = []
+
+    class Learning:
+        def get_due_reviews(self, *, user_id):
+            calls.append(user_id)
+            return [{
+                "display_name": "生成器与 yield",
+                "mastery": 0.51,
+                "overdue_days": 2.0,
+                "due_at": "2026-01-03T00:00:00+00:00",
+            }]
+
+    engine = SimpleNamespace(
+        user_id="alice", store=SimpleNamespace(learning=Learning())
+    )
+    print_due_reviews(engine)
+
+    assert calls == ["alice"]
+    output = capsys.readouterr().out
+    assert "生成器与 yield" in output
+    assert "掌握度 0.510" in output
+    assert "逾期 2.0 天" in output
 
 
 def test_schema_v1_migrates_to_current_version_without_losing_rows(store):

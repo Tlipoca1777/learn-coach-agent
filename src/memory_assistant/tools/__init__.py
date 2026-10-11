@@ -190,6 +190,23 @@ def create_learning_tools(repository, *, user_id: str = "default") -> list[Tool]
                 limit=limit, user_id=user_id
             ),
         ),
+        Tool(
+            name="get_due_reviews",
+            description=(
+                "List this user's knowledge topics that are due for review, ordered "
+                "from the oldest due item first."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}
+                },
+                "additionalProperties": False,
+            },
+            function=lambda limit=10: repository.get_due_reviews(
+                limit=limit, user_id=user_id
+            ),
+        ),
     ]
 
 

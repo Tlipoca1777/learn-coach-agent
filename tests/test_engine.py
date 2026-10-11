@@ -821,7 +821,7 @@ def test_learning_tools_are_available_in_engine_and_scoped_to_user(store):
     assert "薄弱点" in result.reply
     assert {schema["function"]["name"] for schema in engine.tools.schemas()} == {
         "calculator", "get_current_time", "recall_memory",
-        "record_answer", "get_weak_topics"
+        "record_answer", "get_weak_topics", "get_due_reviews"
     }
     assert "python.generator" in llm.calls[2][-1]["content"]
     assert store.learning.get_weak_topics(user_id="alice")[0]["topic_name"] == "python.generator"
