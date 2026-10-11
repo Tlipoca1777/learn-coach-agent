@@ -24,9 +24,10 @@
 | **D11** | LangGraph `StateGraph` + 节点 + 条件边 | 6 | ✅ 已完成 |
 | **D12** | SQLite checkpointer + 跨图实例状态恢复 | 新增 2（图测试共 8） | ✅ 已完成 |
 | **D13** | 端到端回归 + 导出架构图 | 新增 2（集成测试共 4） | ✅ 已完成 |
-| D14+ | 间隔复习 / 部署 | — | ⏳ |
+| **D14** | 缓冲 + M2 里程碑验收 | 全量回归、工具/图/架构图检查 | ✅ 已完成 |
+| D15+ | 用户画像 / 冲突消解 / 学习业务 / 部署 | — | ⏳ |
 
-当前测试基线（2026-10-11，D13 完成）：
+当前测试基线（2026-10-11，D14 完成）：
 
 - 全量测试：**311 passed，4 skipped**（共 315 条）
 - D1 短期记忆：**19/19 通过**
@@ -47,6 +48,7 @@
 - D11 LangGraph：新增 `memory_assistant.graph`，用 `StateGraph` 把 `prepare → respond → finish/fail` 编排成一轮对话；支持注入现有 `ConversationEngine` 或测试 responder，并可用 `graph.get_graph().draw_mermaid()` 导出拓扑
 - D12 SQLite checkpointer：`build_graph(..., checkpointer=saver)` 按 `thread_id` 持久化 LangGraph `AgentState`；关闭并重建 saver 和图后仍能接续消息。它保存的是图状态，不替代 `ConversationEngine` 使用的会话、摘要和长期事实存储
 - D13 端到端回归：集成真实 `ConversationEngine`、工具、SQLite/Chroma 记忆与 SQLite checkpointer，离线验证计算器调用、事实跨重启检索、消息不重复落库，以及工具轮次失败后继续对话；架构图见下方，可用 `python scripts/export_graph.py` 从当前图实现重新导出
+- D14 M2 验收：工具调用、LangGraph 图运行和架构图导出均有测试或命令验证；全量测试保持 311 passed、4 skipped
 
 已就绪的基础设施：
 
