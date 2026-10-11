@@ -23,11 +23,12 @@
 | **D10** | 按需长期记忆检索工具 + 重复调用上限验证 | 7 | ✅ 已完成 |
 | **D11** | LangGraph `StateGraph` + 节点 + 条件边 | 6 | ✅ 已完成 |
 | **D12** | SQLite checkpointer + 跨图实例状态恢复 | 新增 2（图测试共 8） | ✅ 已完成 |
-| D13+ | 架构图 / 间隔复习 / 部署 | — | ⏳ |
+| **D13** | 端到端回归 + 导出架构图 | 新增 2（集成测试共 4） | ✅ 已完成 |
+| D14+ | 间隔复习 / 部署 | — | ⏳ |
 
-当前测试基线（2026-10-11）：
+当前测试基线（2026-10-11，D13 完成）：
 
-- 全量测试：**309 passed，4 skipped**（共 313 条）
+- 全量测试：**311 passed，4 skipped**（共 315 条）
 - D1 短期记忆：**19/19 通过**
 - D2 中期摘要：**42/42 通过**
 - D3 长期记忆基础层：集合初始化、事实写入、按 ID 读取和基础检索已完成
@@ -45,6 +46,7 @@
 - D10 `recall_memory`：模型可在当前上下文没有明确答案时按需搜索长期记忆；`user_id` 由引擎绑定，查询参数校验；FakeLLM 验证工具往返和重复调用触发上限。它补充每轮已有的记忆注入，不替代该检索路径
 - D11 LangGraph：新增 `memory_assistant.graph`，用 `StateGraph` 把 `prepare → respond → finish/fail` 编排成一轮对话；支持注入现有 `ConversationEngine` 或测试 responder，并可用 `graph.get_graph().draw_mermaid()` 导出拓扑
 - D12 SQLite checkpointer：`build_graph(..., checkpointer=saver)` 按 `thread_id` 持久化 LangGraph `AgentState`；关闭并重建 saver 和图后仍能接续消息。它保存的是图状态，不替代 `ConversationEngine` 使用的会话、摘要和长期事实存储
+- D13 端到端回归：集成真实 `ConversationEngine`、工具、SQLite/Chroma 记忆与 SQLite checkpointer，离线验证计算器调用、事实跨重启检索、消息不重复落库，以及工具轮次失败后继续对话；架构图见下方，可用 `python scripts/export_graph.py` 从当前图实现重新导出
 
 已就绪的基础设施：
 
@@ -54,6 +56,55 @@
 - 对话引擎 + 命令行界面（依赖注入设计，可脱离记忆模块单独测试）—— 38 个测试
 
 > 向量模型的选型有实测数据支撑，见 [记忆架构设计 · 第 12 节](docs/记忆架构设计.md#12-向量模型选型实测记录)
+
+## 当前架构
+
+下面描述当前代码中已经实现的运行关系。CLI 仍直接调用 `ConversationEngine`；LangGraph 是可注入引擎的编排入口。图 checkpoint 保存 LangGraph 状态，业务 SQLite 保存会话消息、摘要和学习记录，Chroma 保存长期事实向量及其检索元数据。
+
+```mermaid
+flowchart LR
+    User[用户] --> CLI[CLI]
+    CLI --> Engine[ConversationEngine]
+    User --> Graph[LangGraph StateGraph<br/>可选入口]
+    Graph --> Nodes[prepare → respond → finish / fail]
+    Nodes --> Engine
+    Engine --> LLM[LLM / FakeLLM]
+    Engine --> Registry[ToolRegistry]
+    Registry --> Builtins[计算器 / 当前时间<br/>记忆与学习工具]
+    Builtins --> Engine
+    Engine --> Memories[短期窗口 / 中期摘要<br/>长期事实检索与抽取]
+    Memories --> BusinessDB[(业务 SQLite<br/>sessions / messages / summaries<br/>答题记录)]
+    Memories --> Chroma[(Chroma<br/>长期事实向量)]
+    Graph -. thread_id 状态 .-> Checkpoint[(独立 SQLite checkpointer<br/>AgentState)]
+```
+
+LangGraph 实际节点拓扑由代码导出如下：
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+    __start__([<p>__start__</p>]):::first
+    prepare(prepare)
+    respond(respond)
+    finish(finish)
+    fail(fail)
+    __end__([<p>__end__</p>]):::last
+    __start__ --> prepare;
+    prepare --> respond;
+    respond -.-> fail;
+    respond -.-> finish;
+    fail --> __end__;
+    finish --> __end__;
+    classDef default fill:#f2f0ff,line-height:1.2
+    classDef first fill-opacity:0
+    classDef last fill:#bfb6fc
+```
+
+源图文件位于 [`docs/diagrams/conversation_graph.mmd`](docs/diagrams/conversation_graph.mmd)，重新导出命令为 `python scripts/export_graph.py`。
 
 ---
 
@@ -171,6 +222,8 @@ learn-coach-agent/
 ├─ .gitignore / .gitattributes
 ├─ docs/                        ← 项目文档
 │  ├─ 记忆架构设计.md            ← 四层记忆完整设计（含向量模型选型实测）
+│  ├─ diagrams/
+│  │  └─ conversation_graph.mmd ← 从实际 LangGraph 实现导出的节点拓扑
 │  └─ 业务设计.md                ← 学习教练业务设计
 ├─ scripts/
 │  ├─ check_env.py              ← 环境自检（遇到问题先跑它）
@@ -178,7 +231,8 @@ learn-coach-agent/
 │  ├─ check_embeddings.py       ← 向量层自检（含中文语义检索效果验证）
 │  ├─ step0_hello_llm.py        ← 最小可运行示例：跑通 API 调用
 │  ├─ step1_chat_cli.py         ← 多轮对话 + 流式输出
-│  └─ step2_budget_experiment.py← 三种历史策略的 token 对比实验
+│  ├─ step2_budget_experiment.py← 三种历史策略的 token 对比实验
+│  └─ export_graph.py            ← 离线导出 LangGraph Mermaid 拓扑
 ├─ src/memory_assistant/
 │  ├─ config.py                 ← 配置集中管理
 │  ├─ llm.py                    ← 模型客户端 + 离线假模型 FakeLLM
@@ -204,7 +258,7 @@ learn-coach-agent/
 │  ├─ test_learning.py          ←   答题记录、掌握度、弱项查询与迁移
 │  ├─ test_tools.py             ←   工具 schema、参数校验与工具实现
 │  ├─ test_graph.py             ←   D11–D12 状态图、条件边、checkpoint 恢复与线程隔离
-│  ├─ test_integration.py       ←   2（真实记忆模块 + 离线 CLI）
+│  ├─ test_integration.py       ←   4（真实记忆模块、离线 CLI、图/工具/恢复）
 │  ├─ test_storage.py           ←   39
 │  └─ test_embeddings.py        ←   24（其中 4 条需设置 RUN_SLOW_TESTS=1）
 └─ data/                        ← 本地数据（.gitignore 排除）
