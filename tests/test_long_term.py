@@ -361,18 +361,23 @@ def test_similar_above_threshold_is_merged():
 
 
 def test_similar_below_threshold_creates_new():
-    """相似度 0.90 < 阈值 0.95 → 新事实。"""
+    """不同城市的向量相似度低于阈值时，新事实取代旧事实。"""
     memory = make_memory({"user 住在 杭州": unit(1.0), "user 住在 上海": unit(0.90)})
     memory.add("住在", "杭州")
 
     result = memory.add("住在", "上海")
 
     assert result["action"] == "created"
-    assert memory.count() == 2
+    assert memory.count() == 1
+    assert memory.count(include_invalid=True) == 2
+    facts = memory.search("查询", include_invalid=True)
+    old_fact = next(fact for fact in facts if fact["object"] == "杭州")
+    assert old_fact["invalid_at"] is not None
+    assert [fact["object"] for fact in memory.search("查询")] == ["上海"]
 
 
 def test_dedup_respects_custom_threshold():
-    """阈值调低之后，原本不合并的就该合并了。"""
+    """同一主体、谓词但对象不同按规则消解，不被宽松向量阈值吞掉。"""
     memory = make_memory(
         {"user 住在 杭州": unit(1.0), "user 住在 上海": unit(0.90)},
         dedup_threshold=0.5,

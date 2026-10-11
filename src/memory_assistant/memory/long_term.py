@@ -325,6 +325,20 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 DEFAULT_HIT_BOOST = 0.1
 
 
+def canonicalize_predicate(predicate: str) -> str:
+    """把常见的城市迁移表达归一到同一关系，便于规则版冲突消解。"""
+    value = " ".join(str(predicate).strip().split())
+    aliases = {
+        "搬到": "住在",
+        "搬去": "住在",
+        "居住于": "住在",
+        "居住地": "住在",
+        "现居住地": "住在",
+        "所在城市": "住在",
+    }
+    return aliases.get(value, value)
+
+
 class LongTermMemory:
     """长期记忆：向量库里的结构化事实。规格见模块文档字符串。"""
 
@@ -473,6 +487,7 @@ class LongTermMemory:
         now: datetime | None = None,
     ) -> dict:
         """添加一条事实；有效且足够相似的事实会合并。"""
+        predicate = canonicalize_predicate(predicate)
         moment = now or utc_now()
         timestamp = to_iso(moment)
         text = f"{subject} {predicate} {object}"
@@ -483,6 +498,27 @@ class LongTermMemory:
             record for record in self._all_records(user_id=user_id)
             if record["invalid_at"] is None
         ]
+
+        # 相同事实先做精确去重。
+        exact_match = next(
+            (
+                record
+                for record in existing
+                if record["subject"].strip().casefold() == subject.strip().casefold()
+                and record["predicate"].strip().casefold() == predicate.strip().casefold()
+                and record["object"].strip().casefold() == object.strip().casefold()
+            ),
+            None,
+        )
+        if exact_match is not None:
+            self._update_record(
+                exact_match,
+                confidence=max(float(exact_match["confidence"]), float(confidence)),
+                updated_at=timestamp,
+                hit_count=int(exact_match["hit_count"]) + 1,
+            )
+            return {"id": exact_match["id"], "action": "merged", "similarity": 1.0}
+
         best_record = None
         best_similarity = 0.0
         for record, similarity in self._similarities(embedding, existing):
@@ -501,6 +537,16 @@ class LongTermMemory:
                 "action": "merged",
                 "similarity": best_similarity,
             }
+
+        # 同一用户、同一 subject/predicate 的不同 object 视为新事实取代旧事实。
+        # 先保留既有的高相似度去重行为，未达到阈值时才进入冲突分支。
+        for record in existing:
+            if (
+                record["subject"].strip().casefold() == subject.strip().casefold()
+                and record["predicate"].strip().casefold() == predicate.strip().casefold()
+                and record["object"].strip().casefold() != object.strip().casefold()
+            ):
+                self._update_record(record, invalid_at=timestamp, updated_at=timestamp)
 
         fact_id = uuid.uuid4().hex
         metadata = self._fact_metadata(

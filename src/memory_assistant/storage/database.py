@@ -66,7 +66,7 @@ MEMORY_DB = ":memory:"
 # 每次修改表结构就 +1，然后在 _migrate() 里写对应的升级逻辑。
 # 为什么需要这个？因为真实项目里数据库是有数据的，
 # 你不能直接删库重建，必须能"平滑升级"。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now_iso() -> str:
@@ -99,6 +99,7 @@ SCHEMA_SQL = """
 -- ============ 会话 ============
 CREATE TABLE IF NOT EXISTS sessions (
     id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL DEFAULT 'default',
     title       TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -294,6 +295,21 @@ class Database:
             你会遇到非常难排查的错误（比如"no such column"）。
             在这里明确报错，问题一眼就能定位。
         """
+        # D15 adds sessions.user_id. ALTER TABLE preserves existing sessions.
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "user_id" not in columns:
+            with self.conn:
+                self.conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'"
+                )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user_updated "
+            "ON sessions(user_id, updated_at)"
+        )
+
         row = self.conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
@@ -307,9 +323,10 @@ class Database:
             return
 
         found = int(row["value"])
-        if found == 1 and SCHEMA_VERSION == 2:
-            # v2 只增加学习教练表；initialize() 已通过 IF NOT EXISTS
-            # 安全创建这些表，因此保留原数据后推进版本号即可。
+        if found in {1, 2} and SCHEMA_VERSION == 3:
+            # v2 added learning tables; D15 added sessions.user_id. The schema
+            # script creates missing tables and the additive migration above
+            # preserves existing conversation data.
             with self.conn:
                 self.conn.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema_version'",

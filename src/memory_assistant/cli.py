@@ -14,9 +14,10 @@ r"""
 内置命令（在对话里输入）：
     /help     看帮助
     /status   会话状态：消息数、摘要、覆盖位置、事实条数、token 占用
+    /user     切换用户，例如 /user alice
     /memory   查看当前注入 prompt 的全部记忆内容
     /prompt   查看本次实际发给模型的消息列表（调试神器）
-    /forget   忘掉这个会话的一切（消息 + 摘要 + 事实）
+    /forget   删除当前用户的事实和画像，并清空当前会话消息与摘要
     /exit     退出
 
 --------------------------------------------------------------------
@@ -59,14 +60,29 @@ HELP_TEXT = """
 内置命令：
   /help     显示这份帮助
   /status   会话状态（消息数、摘要、覆盖位置、事实条数、token 占用）
+  /user <id> 切换当前用户及其会话、记忆
   /memory   查看当前注入 prompt 的全部记忆
   /prompt   查看本次实际发给模型的消息列表
-  /forget   忘掉这个会话的一切
+  /forget   删除当前用户的事实和画像，并清空当前会话消息与摘要
   /exit     退出
 
 学习教练：要求模型出一道题并回答后，可问「我有哪些薄弱知识点？」；
 判题记录由 record_answer 保存，查询由 get_weak_topics 完成。
 """
+
+
+def parse_user_command(user_input: str) -> str | None:
+    """Return the requested user id for an exact ``/user`` command.
+
+    A prefix check would accidentally treat commands such as ``/username``
+    as a user switch, so command parsing is intentionally token based.
+    ``None`` means the input is not a user command; an empty string means the
+    command was used without a valid id.
+    """
+    parts = user_input.split(maxsplit=1)
+    if not parts or parts[0] != "/user":
+        return None
+    return parts[1].strip() if len(parts) == 2 else ""
 
 
 # ====================================================================
@@ -244,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="有记忆的私人助理（命令行）",
     )
     parser.add_argument("--session", default=None, help="恢复指定会话 id")
+    parser.add_argument("--user", default="default", help="初始用户 id（默认 default）")
     parser.add_argument("--title", default=None, help="新会话的标题")
     parser.add_argument(
         "--fake", action="store_true", help="用假模型，不调 API、不花钱、可离线"
@@ -290,12 +307,15 @@ def main(argv: list[str] | None = None) -> int:
                 patterns = (
                     (r"我叫([^，。！？\s]+)", "姓名是"),
                     (r"我住在([^，。！？\s]+)", "住在"),
+                    (r"我搬到([^，。！？\s]+)", "住在"),
+                    (r"我搬去([^，。！？\s]+)", "住在"),
                     (r"我喜欢([^，。！？\s]+)", "喜欢"),
                     (r"我对([^，。！？\s]+?)过敏", "对……过敏"),
                 )
                 for line in user_lines:
                     for pattern, predicate in patterns:
                         for value in re.findall(pattern, line):
+                            value = value.removesuffix("了")
                             facts.append({
                                 "subject": "user",
                                 "predicate": predicate,
@@ -316,7 +336,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         engine = ConversationEngine(
-            config, session_id=args.session, title=args.title, **overrides
+            config,
+            session_id=args.session,
+            title=args.title,
+            user_id=args.user,
+            **overrides,
         )
         engine.start()
     except Exception as error:
@@ -324,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"会话 id：{engine.session_id}")
+    print(f"用户    ：{engine.user_id}")
     print(f"模型    ：{'（假模型）' if args.fake else config.model}")
     print(f"数据目录：{config.data_dir}")
     print()
@@ -348,6 +373,19 @@ def main(argv: list[str] | None = None) -> int:
             print(HELP_TEXT)
             continue
 
+        user_id = parse_user_command(user_input)
+        if user_id is not None:
+            if not user_id:
+                print("用法：/user <id>\n")
+                continue
+            try:
+                engine.switch_user(user_id)
+            except ValueError as error:
+                print(f"用户 id 无效：{error}\n")
+                continue
+            print(f"已切换到用户 {engine.user_id}，会话 id：{engine.session_id}\n")
+            continue
+
         if user_input == "/status":
             print_status(engine.status())
             continue
@@ -357,10 +395,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         if user_input == "/forget":
-            confirm = input("确认要忘掉这个会话的一切吗？(输入 yes 确认) > ").strip()
+            confirm = input("确认删除当前用户的长期事实与画像，并清空当前会话吗？(输入 yes 确认) > ").strip()
             if confirm.lower() == "yes":
                 engine.forget_all()
-                print("✅ 已清空消息、摘要和事实。\n")
+                print("✅ 已清空当前会话消息和摘要，并删除当前用户的长期事实与画像。\n")
             else:
                 print("已取消。\n")
             continue

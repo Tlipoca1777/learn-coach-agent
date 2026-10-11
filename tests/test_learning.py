@@ -156,7 +156,7 @@ def test_schema_v1_migrates_to_current_version_without_losing_rows(store):
     version = store.db.conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()["value"]
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
     assert int(version) == SCHEMA_VERSION
     assert store.sessions.get(session_id)["title"] == "kept"
     assert {"topics", "attempts", "topic_mastery"}.issubset(

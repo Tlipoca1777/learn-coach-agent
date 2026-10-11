@@ -25,17 +25,18 @@
 | **D12** | SQLite checkpointer + 跨图实例状态恢复 | 新增 2（图测试共 8） | ✅ 已完成 |
 | **D13** | 端到端回归 + 导出架构图 | 新增 2（集成测试共 4） | ✅ 已完成 |
 | **D14** | 缓冲 + M2 里程碑验收 | 全量回归、工具/图/架构图检查 | ✅ 已完成 |
-| D15+ | 用户画像 / 冲突消解 / 学习业务 / 部署 | — | ⏳ |
+| **D15** | 用户画像 + 规则版冲突消解 + 多用户隔离 | 7 项专项用例；相关定向回归 151 passed | ✅ 已完成 |
+| D16–D21 | 学习业务 / 评测 / Web 与部署 / 收尾 | — | ⏳ |
 
-当前测试基线（2026-10-11，D14 完成）：
+当前测试基线（2026-10-11，D15 完成）：
 
-- 全量测试：**311 passed，4 skipped**（共 315 条）
+- 全量测试：**318 passed，4 skipped**（共 322 条；离线运行）
 - D1 短期记忆：**19/19 通过**
 - D2 中期摘要：**42/42 通过**
 - D3 长期记忆基础层：集合初始化、事实写入、按 ID 读取和基础检索已完成
 - D4 长期记忆增强层：三因子评分、时间衰减、命中加权、去重、失效与删除已完成（51/51）
 - D5 事实抽取：prompt 构造、健壮 JSON 解析、置信度过滤、批内去重与异常保护已完成（57/57）
-- 已就绪基础设施：SQLite 存储 **39/39**、对话引擎 **38/38**、向量层 **20/20**（另有 4 条真实模型慢测默认跳过）
+- 已就绪基础设施：SQLite 存储 **39/39**、对话引擎 **44/44**、向量层 **20/20**（另有 4 条真实模型慢测默认跳过）
 - D6 集成验证：真实 SQLite、Chroma、四个记忆模块与对话引擎协同通过；`--fake` 中文 CLI 流程通过
 - `--fake` 使用 FakeLLM + FakeEmbeddings，离线运行但仍走真实记忆写入、检索和摘要路径
 - D7 真实 API 验证：运行 `python scripts/verify_live_memory.py --cache-dir data/models`，会产生模型 API 用量，并将数据写入独立的 `data/d7-live-check`；假向量验证使用独立集合
@@ -49,13 +50,14 @@
 - D12 SQLite checkpointer：`build_graph(..., checkpointer=saver)` 按 `thread_id` 持久化 LangGraph `AgentState`；关闭并重建 saver 和图后仍能接续消息。它保存的是图状态，不替代 `ConversationEngine` 使用的会话、摘要和长期事实存储
 - D13 端到端回归：集成真实 `ConversationEngine`、工具、SQLite/Chroma 记忆与 SQLite checkpointer，离线验证计算器调用、事实跨重启检索、消息不重复落库，以及工具轮次失败后继续对话；架构图见下方，可用 `python scripts/export_graph.py` 从当前图实现重新导出
 - D14 M2 验收：工具调用、LangGraph 图运行和架构图导出均有测试或命令验证；全量测试保持 311 passed、4 skipped
+- D15 用户画像与多用户隔离：SQLite schema v3 为会话补充 `user_id`；画像按用户存为 JSON；长期事实写入时先执行原有去重，再对同一用户、同一 `subject + predicate` 的不同值标记旧事实失效。CLI 支持 `--user <id>` 和 `/user <id>`；Alice/Bob 的会话、摘要、事实、画像及记忆工具均按用户隔离；151 项定向回归和全量离线回归（318 passed、4 skipped）通过
 
 已就绪的基础设施：
 
 - 配置管理、DeepSeek 客户端（含离线假模型 `FakeLLM`）、环境自检脚本
 - SQLite 持久化层（`Database` + `Store`）—— 39 个测试
 - 向量层（本地中文 BGE 模型 + 假向量模型）—— 20 个快速测试
-- 对话引擎 + 命令行界面（依赖注入设计，可脱离记忆模块单独测试）—— 38 个测试
+- 对话引擎 + 命令行界面（依赖注入设计，可脱离记忆模块单独测试）—— 44 个测试
 
 > 向量模型的选型有实测数据支撑，见 [记忆架构设计 · 第 12 节](docs/记忆架构设计.md#12-向量模型选型实测记录)
 
@@ -139,7 +141,7 @@ graph TD;
 
 - **抽取**：从对话里自动识别值得记住的事实（`subject-predicate-object` 三元组）
 - **去重**：相似事实合并，累加命中次数而不是重复存储
-- **冲突消解**：用户改主意时（"我戒咖啡了"）让模型裁决，旧事实标记失效而非删除
+- **冲突消解**：同一用户、同一主体和谓词出现不同值时，规则版标记旧事实失效；不调用 LLM
 - **遗忘**：时间衰减 + 低频淘汰 + TTL，防止向量库无限膨胀
 - **配额**：显式的 prompt token 预算表，保证输入永不失控
 
@@ -246,6 +248,7 @@ learn-coach-agent/
 │  │  ├─ short_term.py          ←   短期：滑动窗口 + token 预算
 │  │  ├─ summary.py             ←   中期：递归增量摘要
 │  │  ├─ long_term.py           ←   长期：向量库 + 三因子评分 + 去重/失效
+│  │  ├─ profile.py             ←   用户画像模型与 prompt 渲染
 │  │  └─ extraction.py          ←   事实抽取（结构化输出 + 健壮解析）
 │  ├─ engine.py                 ← 对话引擎：把四层记忆串起来
 │  ├─ graph.py                  ← D11–D12 LangGraph 编排、checkpointer 接口与 Mermaid 导出
@@ -255,6 +258,7 @@ learn-coach-agent/
 │  ├─ test_short_term.py        ←   19
 │  ├─ test_summary.py           ←   42
 │  ├─ test_long_term.py         ←   51
+│  ├─ test_d15.py               ←   D15 用户画像、冲突消解和用户隔离
 │  ├─ test_extraction.py        ←   57
 │  ├─ test_engine.py            ←   对话、工具往返与用户隔离
 │  ├─ test_learning.py          ←   答题记录、掌握度、弱项查询与迁移
@@ -277,7 +281,9 @@ learn-coach-agent/
 | `/status` | 查看会话状态、消息数和 token 占用 |
 | `/memory` | 查看当前注入 prompt 的记忆 |
 | `/help` | 显示命令帮助 |
-| `/forget` | 清空当前会话消息、摘要和长期事实 |
+| `/forget` | 删除当前用户的长期事实与画像，并清空当前会话消息和摘要 |
+| `/user <id>` | 切换用户，并恢复该用户最近的会话；记忆与画像随用户隔离 |
+| `--user <id>` | 启动时指定用户，例如 `python -m memory_assistant --fake --user alice` |
 | `--fake` | 启动离线模式；假模型和假向量驱动真实记忆链路 |
 
 ---

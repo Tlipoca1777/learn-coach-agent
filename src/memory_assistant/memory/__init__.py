@@ -16,7 +16,8 @@ long_term / profile 是后面几周的内容，实现之后再往这里加导出
 """
 
 from memory_assistant.memory.extraction import ExtractedFact, FactExtractor
-from memory_assistant.memory.long_term import LongTermMemory
+from memory_assistant.memory.long_term import LongTermMemory, canonicalize_predicate
+from memory_assistant.memory.profile import UserProfile
 from memory_assistant.memory.short_term import ShortTermMemory
 from memory_assistant.memory.summary import SummaryMemory
 
@@ -24,6 +25,8 @@ __all__ = [
     "ShortTermMemory",
     "SummaryMemory",
     "LongTermMemory",
+    "UserProfile",
+    "canonicalize_predicate",
     "ExtractedFact",
     "FactExtractor",
 ]

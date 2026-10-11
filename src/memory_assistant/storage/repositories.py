@@ -51,6 +51,7 @@ r"""
 """
 
 import math
+import json
 import uuid
 
 from memory_assistant.storage.database import Database, utc_now_iso
@@ -73,7 +74,13 @@ class SessionRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def create(self, session_id: str | None = None, title: str | None = None) -> str:
+    def create(
+        self,
+        session_id: str | None = None,
+        title: str | None = None,
+        *,
+        user_id: str = "default",
+    ) -> str:
         """
         创建一个新会话，返回它的 id。
 
@@ -81,11 +88,14 @@ class SessionRepository:
         自动生成的 id 用 uuid4().hex[:12] —— 12 位十六进制，
         碰撞概率极低，而且比完整 uuid 好读。
         """
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty string")
         session_id = session_id or uuid.uuid4().hex[:12]
         now = utc_now_iso()
         self.db.conn.execute(
-            "INSERT INTO sessions(id, title, created_at, updated_at) VALUES(?, ?, ?, ?)",
-            (session_id, title, now, now),
+            "INSERT INTO sessions(id, user_id, title, created_at, updated_at) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (session_id, user_id.strip(), title, now, now),
         )
         self.db.conn.commit()
         return session_id
@@ -97,15 +107,24 @@ class SessionRepository:
         ).fetchone()
         return dict(row) if row else None
 
-    def get_or_create(self, session_id: str, title: str | None = None) -> str:
+    def get_or_create(
+        self,
+        session_id: str,
+        title: str | None = None,
+        *,
+        user_id: str = "default",
+    ) -> str:
         """
         有就返回，没有就创建。
 
         这个方法是给 CLI 用的：用户可能用 --session abc 指定一个会话，
         第一次用的时候它还不存在，我们希望自动建好而不是报错。
         """
-        if self.get(session_id) is None:
-            self.create(session_id=session_id, title=title)
+        existing = self.get(session_id)
+        if existing is None:
+            self.create(session_id=session_id, title=title, user_id=user_id)
+        elif existing.get("user_id", "default") != user_id:
+            raise PermissionError("会话属于其他用户")
         return session_id
 
     def touch(self, session_id: str) -> None:
@@ -115,11 +134,17 @@ class SessionRepository:
             (utc_now_iso(), session_id),
         )
 
-    def list_recent(self, limit: int = 10) -> list[dict]:
+    def list_recent(self, limit: int = 10, *, user_id: str | None = None) -> list[dict]:
         """列出最近活动的会话，用于给用户展示"继续哪个对话"。"""
-        rows = self.db.conn.execute(
-            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+        if user_id is None:
+            rows = self.db.conn.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = self.db.conn.execute(
+                "SELECT * FROM sessions WHERE user_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?", (user_id, limit)
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def delete(self, session_id: str) -> bool:
@@ -347,6 +372,60 @@ class SummaryRepository:
         return cursor.rowcount
 
 
+class ProfileRepository:
+    """按用户保存结构化画像；画像字段采用增量合并而不是整行覆盖。"""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def get(self, user_id: str = "default") -> dict:
+        row = self.db.conn.execute(
+            "SELECT data FROM profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            value = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def update(self, user_id: str, values: dict) -> dict:
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty string")
+        if not isinstance(values, dict):
+            raise ValueError("profile values must be a dictionary")
+        merged = self.get(user_id)
+        merged.update(values)
+        now = utc_now_iso()
+        with self.db.conn:
+            self.db.conn.execute(
+                "INSERT INTO profiles(user_id, data, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, "
+                "updated_at=excluded.updated_at",
+                (user_id.strip(), json.dumps(merged, ensure_ascii=False), now),
+            )
+        return merged
+
+    def replace(self, user_id: str, values: dict) -> dict:
+        if not isinstance(values, dict):
+            raise ValueError("profile values must be a dictionary")
+        now = utc_now_iso()
+        with self.db.conn:
+            self.db.conn.execute(
+                "INSERT INTO profiles(user_id, data, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, "
+                "updated_at=excluded.updated_at",
+                (user_id, json.dumps(values, ensure_ascii=False), now),
+            )
+        return dict(values)
+
+    def delete(self, user_id: str) -> bool:
+        cursor = self.db.conn.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
+        self.db.conn.commit()
+        return cursor.rowcount > 0
+
+
 class LearningRepository:
     """Persist learning topics, answer attempts and per-user mastery."""
 
@@ -519,8 +598,7 @@ class Store:
         self.messages = MessageRepository(db)
         self.summaries = SummaryRepository(db)
         self.learning = LearningRepository(db)
-        # TODO（第 5 周）：facts 仓储（需要配合 Chroma 向量库）
-        # TODO（第 10 周）：profiles 仓储（用户画像）
+        self.profiles = ProfileRepository(db)
 
     def delete_session(self, session_id: str) -> None:
         """

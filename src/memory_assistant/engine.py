@@ -115,6 +115,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 # prompt 里两段附加内容的小标题
 LONG_TERM_HEADER = "【关于用户的已知信息（来自你的长期记忆）】\n"
+PROFILE_HEADER = "【用户画像】\n"
 SUMMARY_HEADER = "【更早对话的摘要】\n"
 
 DEFAULT_RETRIEVE_TOP_K = 5
@@ -179,6 +180,9 @@ class ConversationEngine:
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.user_id = user_id
+        if not isinstance(self.user_id, str) or not self.user_id.strip():
+            raise ValueError("user_id must be a non-empty string")
+        self.user_id = self.user_id.strip()
         self.system_prompt = system_prompt
         self.retrieve_top_k = retrieve_top_k
         self.long_term_token_budget = long_term_token_budget
@@ -216,24 +220,8 @@ class ConversationEngine:
         self.extractor = (
             extractor if extractor is not None else self._build_extractor()
         )
-        if tools is None:
-            from memory_assistant.tools import (
-                create_default_tools,
-                create_learning_tools,
-                create_memory_tools,
-            )
-
-            self.tools = create_default_tools()
-            for tool in create_memory_tools(self.long_term, user_id=self.user_id):
-                self.tools.register(tool)
-            learning_repository = getattr(self.store, "learning", None)
-            if learning_repository is not None:
-                for tool in create_learning_tools(
-                    learning_repository, user_id=self.user_id
-                ):
-                    self.tools.register(tool)
-        else:
-            self.tools = tools
+        self._default_tools = tools is None
+        self.tools = tools if tools is not None else self._build_tools()
 
     # ------------------------------------------------------------------
     # 按配置创建各个部件
@@ -300,6 +288,22 @@ class ConversationEngine:
 
         return FactExtractor(self.llm)
 
+    def _build_tools(self):
+        from memory_assistant.tools import (
+            create_default_tools,
+            create_learning_tools,
+            create_memory_tools,
+        )
+
+        registry = create_default_tools()
+        for tool in create_memory_tools(self.long_term, user_id=self.user_id):
+            registry.register(tool)
+        learning_repository = getattr(self.store, "learning", None)
+        if learning_repository is not None:
+            for tool in create_learning_tools(learning_repository, user_id=self.user_id):
+                registry.register(tool)
+        return registry
+
     # ==================================================================
     # 启动 / 恢复
     # ==================================================================
@@ -315,7 +319,9 @@ class ConversationEngine:
              2. 把最新摘要 restore 回摘要层
              3. 记住摘要覆盖到哪个 id
         """
-        self.store.sessions.get_or_create(self.session_id, self.title)
+        self.store.sessions.get_or_create(
+            self.session_id, self.title, user_id=self.user_id
+        )
 
         rows = self.store.messages.list_by_session(self.session_id)
         self._history = [
@@ -337,6 +343,30 @@ class ConversationEngine:
 
         self._started = True
         return self.session_id
+
+    def switch_user(self, user_id: str) -> str:
+        """切换到用户自己的最近会话，并清空前一用户的内存态。"""
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty string")
+        user_id = user_id.strip()
+        self._ensure_started()
+        if user_id == self.user_id:
+            return self.session_id
+
+        self.short_term.clear()
+        self.summary.clear()
+        self._history.clear()
+        self._covered_until = 0
+        self._fed_until = 0
+        self._started = False
+        self.last_error = None
+        self.user_id = user_id
+
+        recent = self.store.sessions.list_recent(1, user_id=user_id)
+        self.session_id = recent[0]["id"] if recent else uuid.uuid4().hex[:12]
+        if self._default_tools:
+            self.tools = self._build_tools()
+        return self.start()
 
     def _ensure_started(self) -> None:
         if not self._started:
@@ -385,7 +415,10 @@ class ConversationEngine:
         fact_lines = self._format_facts(facts)
         result.retrieved_facts = fact_lines
 
-        result.prompt = self._build_prompt(result.summary_used, fact_lines, window)
+        profile = self.store.profiles.get(self.user_id) if hasattr(self.store, "profiles") else {}
+        result.prompt = self._build_prompt(
+            result.summary_used, fact_lines, window, profile=profile
+        )
         result.budget = self._budget_report(result.prompt, window, fact_lines)
 
         # ---------- 4. 调模型 ----------
@@ -521,7 +554,12 @@ class ConversationEngine:
         return lines
 
     def _build_prompt(
-        self, summary_text: str | None, fact_lines: list[str], window: list[dict]
+        self,
+        summary_text: str | None,
+        fact_lines: list[str],
+        window: list[dict],
+        *,
+        profile: dict | None = None,
     ) -> list[dict]:
         """
         prompt 的固定顺序：
@@ -542,6 +580,14 @@ class ConversationEngine:
             prompt.append(
                 {"role": "system", "content": LONG_TERM_HEADER + "\n".join(fact_lines)}
             )
+        if profile:
+            from memory_assistant.memory.profile import UserProfile
+
+            rendered_profile = UserProfile.from_mapping(self.user_id, profile).render()
+            if rendered_profile:
+                prompt.append(
+                    {"role": "system", "content": PROFILE_HEADER + rendered_profile}
+                )
         if summary_text:
             prompt.append(
                 {"role": "system", "content": SUMMARY_HEADER + summary_text}
@@ -627,14 +673,21 @@ class ConversationEngine:
 
         for fact in facts:
             try:
+                from memory_assistant.memory.long_term import canonicalize_predicate
+
+                predicate = canonicalize_predicate(fact.predicate)
                 self.long_term.add(
-                    fact.predicate,
+                    predicate,
                     fact.object,
                     subject=fact.subject,
                     user_id=self.user_id,
                     confidence=fact.confidence,
                     source_message_id=source_message_id,
                 )
+                if hasattr(self.store, "profiles"):
+                    self.store.profiles.update(
+                        self.user_id, {predicate: fact.object}
+                    )
             except Exception as error:
                 self.last_error = error
 
@@ -677,6 +730,8 @@ class ConversationEngine:
         self._ensure_started()
         self.store.delete_session(self.session_id)
         self.long_term.delete_user(self.user_id)
+        if hasattr(self.store, "profiles"):
+            self.store.profiles.delete(self.user_id)
         self.short_term.clear()
         self.summary.clear()
         self._history.clear()
