@@ -1,8 +1,8 @@
-"""D11: small LangGraph orchestration contract tests.
+"""D11-D12 LangGraph orchestration and persistence contract tests.
 
-These tests deliberately use a tiny engine double.  D11 is about the graph
-topology and state hand-off; persistence/checkpointing belongs to D12 and the
-real LLM belongs to the integration tests.
+These tests deliberately use a tiny engine double. They cover graph topology,
+state hand-off, SQLite checkpoint recovery, and thread isolation; the real LLM
+belongs to the integration tests.
 """
 
 from __future__ import annotations
@@ -121,9 +121,8 @@ def test_graph_has_conditional_success_and_error_branches():
     names = set(drawable.nodes)
     lower_names = {str(name).lower() for name in names}
 
-    # The D11 graph intentionally stays small: prepare -> respond -> finish
-    # on success and either prepare/respond -> fail on an error.  This keeps
-    # the conditional routing visible before D12 adds checkpointing.
+    # The graph intentionally stays small: prepare -> respond -> finish on
+    # success, or prepare/respond -> fail on an error.
     for expected in ("prepare", "respond", "finish", "fail"):
         assert any(expected in name for name in lower_names), (
             f"missing {expected!r} node in graph: {sorted(lower_names)}"
@@ -157,4 +156,71 @@ def test_graph_rejects_missing_user_message():
     except (ValueError, KeyError, TypeError):
         return
     assert output.get("error"), "an empty message list must take the error path"
+
+
+def test_sqlite_checkpointer_restores_state_across_graph_instances(tmp_path):
+    sqlite_checkpoint = pytest.importorskip("langgraph.checkpoint.sqlite")
+    saver_type = sqlite_checkpoint.SqliteSaver
+    database_path = tmp_path / "graph-checkpoints.sqlite"
+    config = {"configurable": {"thread_id": "conversation-1"}}
+
+    with saver_type.from_conn_string(str(database_path)) as saver:
+        first_graph = _factory()(
+            responder=lambda text: "答复: " + text,
+            checkpointer=saver,
+        )
+        first = first_graph.invoke(
+            {"messages": [{"role": "user", "content": "第一轮"}]},
+            config=config,
+        )
+        assert [message["content"] for message in first["messages"]] == [
+            "第一轮",
+            "答复: 第一轮",
+        ]
+
+    # Reopening both the saver and graph models a process restart.
+    with saver_type.from_conn_string(str(database_path)) as saver:
+        second_graph = _factory()(
+            responder=lambda text: "答复: " + text,
+            checkpointer=saver,
+        )
+        second = second_graph.invoke(
+            {"messages": [{"role": "user", "content": "第二轮"}]},
+            config=config,
+        )
+
+    assert [message["content"] for message in second["messages"]] == [
+        "第一轮",
+        "答复: 第一轮",
+        "第二轮",
+        "答复: 第二轮",
+    ]
+
+
+def test_sqlite_checkpointer_isolates_threads(tmp_path):
+    sqlite_checkpoint = pytest.importorskip("langgraph.checkpoint.sqlite")
+    with sqlite_checkpoint.SqliteSaver.from_conn_string(
+        str(tmp_path / "graph-checkpoints.sqlite")
+    ) as saver:
+        graph = _factory()(
+            responder=lambda text: "答复: " + text,
+            checkpointer=saver,
+        )
+        first = graph.invoke(
+            {"messages": [{"role": "user", "content": "会话甲"}]},
+            config={"configurable": {"thread_id": "thread-a"}},
+        )
+        second = graph.invoke(
+            {"messages": [{"role": "user", "content": "会话乙"}]},
+            config={"configurable": {"thread_id": "thread-b"}},
+        )
+
+    assert [message["content"] for message in first["messages"]] == [
+        "会话甲",
+        "答复: 会话甲",
+    ]
+    assert [message["content"] for message in second["messages"]] == [
+        "会话乙",
+        "答复: 会话乙",
+    ]
 

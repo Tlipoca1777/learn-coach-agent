@@ -22,11 +22,12 @@
 | **D9** | 学习记录、掌握度追踪 + 薄弱知识点查询 | 10 | ✅ 已完成 |
 | **D10** | 按需长期记忆检索工具 + 重复调用上限验证 | 7 | ✅ 已完成 |
 | **D11** | LangGraph `StateGraph` + 节点 + 条件边 | 6 | ✅ 已完成 |
-| D12+ | Checkpointer / 间隔复习 / 部署 | — | ⏳ |
+| **D12** | SQLite checkpointer + 跨图实例状态恢复 | 新增 2（图测试共 8） | ✅ 已完成 |
+| D13+ | 架构图 / 间隔复习 / 部署 | — | ⏳ |
 
 当前测试基线（2026-10-11）：
 
-- 全量测试：**307 passed，4 skipped**（共 311 条）
+- 全量测试：**309 passed，4 skipped**（共 313 条）
 - D1 短期记忆：**19/19 通过**
 - D2 中期摘要：**42/42 通过**
 - D3 长期记忆基础层：集合初始化、事实写入、按 ID 读取和基础检索已完成
@@ -42,7 +43,8 @@
 - D9 学习教练：schema v1→v2 迁移新增 `topics` / `attempts` / `topic_mastery`；`record_answer` 持久化答题并更新掌握度，`get_weak_topics` 按掌握度返回当前用户的薄弱点；两工具通过引擎和 FakeLLM 完成离线往返验证
 - D9 当前掌握度规则：初始值 0.3；答对按 `(1-mastery)*0.3` 增长，半对按 `(1-mastery)*0.15` 增长，答错减半；低于 0.4 返回为薄弱点。SM-2 和到期复习尚未实现
 - D10 `recall_memory`：模型可在当前上下文没有明确答案时按需搜索长期记忆；`user_id` 由引擎绑定，查询参数校验；FakeLLM 验证工具往返和重复调用触发上限。它补充每轮已有的记忆注入，不替代该检索路径
-- D11 LangGraph：新增 `memory_assistant.graph`，用 `StateGraph` 把 `prepare → respond → finish/fail` 编排成一轮对话；支持注入现有 `ConversationEngine` 或测试 responder，并可用 `graph.get_graph().draw_mermaid()` 导出拓扑。D11 尚未接入 checkpointer，断点恢复属于 D12
+- D11 LangGraph：新增 `memory_assistant.graph`，用 `StateGraph` 把 `prepare → respond → finish/fail` 编排成一轮对话；支持注入现有 `ConversationEngine` 或测试 responder，并可用 `graph.get_graph().draw_mermaid()` 导出拓扑
+- D12 SQLite checkpointer：`build_graph(..., checkpointer=saver)` 按 `thread_id` 持久化 LangGraph `AgentState`；关闭并重建 saver 和图后仍能接续消息。它保存的是图状态，不替代 `ConversationEngine` 使用的会话、摘要和长期事实存储
 
 已就绪的基础设施：
 
@@ -190,7 +192,7 @@ learn-coach-agent/
 │  │  ├─ long_term.py           ←   长期：向量库 + 三因子评分 + 去重/失效
 │  │  └─ extraction.py          ←   事实抽取（结构化输出 + 健壮解析）
 │  ├─ engine.py                 ← 对话引擎：把四层记忆串起来
-│  ├─ graph.py                  ← D11 LangGraph 单轮编排与 Mermaid 导出
+│  ├─ graph.py                  ← D11–D12 LangGraph 编排、checkpointer 接口与 Mermaid 导出
 │  ├─ cli.py / __main__.py      ← 命令行界面
 │  └─ __init__.py               ← 包入口
 ├─ tests/                       ← pytest 全量测试
@@ -201,7 +203,7 @@ learn-coach-agent/
 │  ├─ test_engine.py            ←   对话、工具往返与用户隔离
 │  ├─ test_learning.py          ←   答题记录、掌握度、弱项查询与迁移
 │  ├─ test_tools.py             ←   工具 schema、参数校验与工具实现
-│  ├─ test_graph.py             ←   D11 状态图、条件边与 Mermaid 导出
+│  ├─ test_graph.py             ←   D11–D12 状态图、条件边、checkpoint 恢复与线程隔离
 │  ├─ test_integration.py       ←   2（真实记忆模块 + 离线 CLI）
 │  ├─ test_storage.py           ←   39
 │  └─ test_embeddings.py        ←   24（其中 4 条需设置 RUN_SLOW_TESTS=1）
@@ -243,7 +245,22 @@ learn-coach-agent/
   重构后获得了断点恢复、流式、图可视化等能力，但自研的去重和冲突消解逻辑仍然保留。
 
 - **D11 为什么只做编排适配层？**
-  `ConversationEngine` 已经负责记忆检索、prompt 组装和有界工具循环。图节点只负责把一轮输入、响应和错误状态连接起来，避免复制业务逻辑；D12 再为这张图增加持久化 checkpointer。
+  `ConversationEngine` 已经负责记忆检索、prompt 组装和有界工具循环。图节点只负责把一轮输入、响应和错误状态连接起来，避免复制业务逻辑；D12 通过依赖注入增加 SQLite checkpointer，而不把持久化实现绑进图本身。
+
+- **如何给 LangGraph 接入 SQLite checkpointer？**
+  ```python
+  from langgraph.checkpoint.sqlite import SqliteSaver
+  from memory_assistant.graph import build_graph
+
+  with SqliteSaver.from_conn_string("data/graph-checkpoints.sqlite") as saver:
+      graph = build_graph(responder=lambda text: "答复: " + text, checkpointer=saver)
+      config = {"configurable": {"thread_id": "alice-session-1"}}
+      result = graph.invoke(
+          {"messages": [{"role": "user", "content": "你好"}]},
+          config=config,
+      )
+  ```
+  后续轮次复用同一个 `thread_id`，并只传入新增的 user 消息；不同会话使用不同 ID。这个 SQLite 文件存图状态，和长期事实库是不同用途的数据库。
 
 （后续持续补充）
 

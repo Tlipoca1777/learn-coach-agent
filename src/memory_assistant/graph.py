@@ -9,7 +9,8 @@ The graph is dependency-injected so it can be exercised without an API call::
     graph = build_graph(responder=lambda text: "答复: " + text)
     result = graph.invoke({"messages": [{"role": "user", "content": "你好"}]})
 
-Checkpointing is intentionally left to D12.  The compiled graph returned by
+Checkpointing is optional and supplied by the caller, so storage lifetime and
+location stay outside the graph definition.  The compiled graph returned by
 ``build_graph`` supports ``get_graph().draw_mermaid()`` for inspection.
 """
 
@@ -37,6 +38,7 @@ class AgentState(TypedDict, total=False):
     """
 
     messages: Annotated[list[dict[str, Any]], operator.add]
+    processed_message_count: int
     user_id: str
     user_input: str
     reply: str
@@ -113,26 +115,36 @@ def build_graph(
     engine: Any | None = None,
     *,
     responder: Responder | None = None,
+    checkpointer: Any | None = None,
 ):
-    """Build and compile the D11 one-turn conversation graph.
+    """Build and compile the one-turn conversation graph.
 
     The topology is ``START -> prepare -> respond``.  A conditional edge then
     routes successful turns to ``finish`` and failed turns to ``fail``; both
     nodes terminate at ``END``.  ``engine`` is normally a
     :class:`ConversationEngine`, while ``responder`` is convenient for tests
-    and other adapters.
+    and other adapters.  Pass a LangGraph checkpointer (for example
+    ``SqliteSaver``) to persist graph state per ``thread_id``.
     """
 
     reply_fn = _resolve_responder(engine, responder)
 
     def prepare(state: AgentState) -> dict[str, Any]:
         supplied_input = state.get("user_input")
-        user_input = (
-            supplied_input.strip()
-            if isinstance(supplied_input, str) and supplied_input.strip()
-            else _latest_user_message(state.get("messages"))
-        )
-        return {"user_input": user_input, "route": "respond", "error": None}
+        messages = state.get("messages") or []
+        processed_count = state.get("processed_message_count", 0)
+        has_new_messages = len(messages) > processed_count
+        if has_new_messages:
+            user_input = _latest_user_message(messages)
+        elif isinstance(supplied_input, str) and supplied_input.strip():
+            user_input = supplied_input.strip()
+        else:
+            user_input = _latest_user_message(messages)
+        return {
+            "user_input": user_input,
+            "route": "respond",
+            "error": None,
+        }
 
     def respond(state: AgentState) -> dict[str, Any]:
         try:
@@ -159,10 +171,17 @@ def build_graph(
         return "fail" if state.get("error") or state.get("route") == "fail" else "finish"
 
     def finish(state: AgentState) -> dict[str, Any]:
-        return {"route": "finish"}
+        return {
+            "route": "finish",
+            "processed_message_count": len(state.get("messages") or []),
+        }
 
     def fail(state: AgentState) -> dict[str, Any]:
-        return {"reply": "", "route": "fail"}
+        return {
+            "reply": "",
+            "route": "fail",
+            "processed_message_count": len(state.get("messages") or []),
+        }
 
     workflow = StateGraph(AgentState)
     workflow.add_node("prepare", prepare)
@@ -178,17 +197,18 @@ def build_graph(
     )
     workflow.add_edge("finish", END)
     workflow.add_edge("fail", END)
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 def build_conversation_graph(
     engine: Any | None = None,
     *,
     responder: Responder | None = None,
+    checkpointer: Any | None = None,
 ):
     """Descriptive alias for :func:`build_graph`."""
 
-    return build_graph(engine, responder=responder)
+    return build_graph(engine, responder=responder, checkpointer=checkpointer)
 
 
 create_graph = build_conversation_graph
