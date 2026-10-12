@@ -63,6 +63,7 @@ HELP_TEXT = """
   /user <id> 切换当前用户及其会话、记忆
   /memory   查看当前注入 prompt 的全部记忆
   /due      查看当前用户到期待复习的知识点
+  /quiz [知识点] 出一道自适应题；下一行输入答案
   /prompt   查看本次实际发给模型的消息列表
   /forget   删除当前用户的事实和画像，并清空当前会话消息与摘要
   /exit     退出
@@ -268,6 +269,13 @@ def print_due_reviews(engine) -> None:
     print()
 
 
+def print_quiz_result(result) -> None:
+    """Render a D17 question or Socratic answer feedback."""
+    print("\n学习教练：")
+    print(result.message)
+    print()
+
+
 # ====================================================================
 # 主流程
 # ====================================================================
@@ -315,8 +323,26 @@ def main(argv: list[str] | None = None) -> int:
         from memory_assistant.llm import FakeLLM
         from memory_assistant.memory import LongTermMemory
 
+        quiz_judgements = 0
+
         def fake_reply(messages):
+            nonlocal quiz_judgements
             prompt_text = "\n".join(message.get("content", "") for message in messages)
+            if "生成一道关于指定知识点" in prompt_text:
+                return "请解释这个知识点解决什么问题，并举一个例子。"
+            if "必须只返回 JSON" in prompt_text:
+                quiz_judgements += 1
+                if quiz_judgements == 1:
+                    return json.dumps({
+                        "verdict": "wrong", "score": 0,
+                        "feedback": "先回忆它解决的问题，再说关键步骤。",
+                        "explanation": "",
+                    }, ensure_ascii=False)
+                return json.dumps({
+                    "verdict": "wrong", "score": 0,
+                    "feedback": "",
+                    "explanation": "请从定义、作用和具体例子三个方面重新理解这个知识点。",
+                }, ensure_ascii=False)
             if "信息抽取器" in prompt_text:
                 conversation = prompt_text.split("需要抽取的对话：", 1)[-1]
                 user_lines = re.findall(r"^user: (.*)$", conversation, re.MULTILINE)
@@ -415,6 +441,14 @@ def main(argv: list[str] | None = None) -> int:
             print_due_reviews(engine)
             continue
 
+        if user_input == "/quiz" or user_input.startswith("/quiz "):
+            topic = user_input[5:].strip() or None
+            try:
+                print_quiz_result(engine.start_quiz(topic))
+            except (RuntimeError, ValueError) as error:
+                print(f"答题启动失败：{error}\n")
+            continue
+
         if user_input == "/forget":
             confirm = input("确认删除当前用户的长期事实与画像，并清空当前会话吗？(输入 yes 确认) > ").strip()
             if confirm.lower() == "yes":
@@ -422,6 +456,15 @@ def main(argv: list[str] | None = None) -> int:
                 print("✅ 已清空当前会话消息和摘要，并删除当前用户的长期事实与画像。\n")
             else:
                 print("已取消。\n")
+            continue
+
+        # A quiz answer belongs to the active question and must not be sent as
+        # an ordinary chat message.  Commands above still remain available.
+        if engine.quiz is not None and engine.quiz.active is not None:
+            try:
+                print_quiz_result(engine.answer_quiz(user_input))
+            except (RuntimeError, ValueError) as error:
+                print(f"答题失败：{error}\n")
             continue
 
         # ---------- 正常对话 ----------

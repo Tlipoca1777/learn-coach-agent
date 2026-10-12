@@ -107,6 +107,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "回答要简洁、具体、有用。如果用户询问个人信息，先检查当前上下文；"
     "若没有明确答案，按需调用 recall_memory 检索相关过去事实；"
     "检索仍无结果时，诚实地说你不记得，不要编造。\n"
+    "如果出题且用户没有指定知识点，优先参考 get_due_reviews，再参考 get_weak_topics，"
+    "并说明选择理由；答错时先指出一个小方向并要求再次尝试，第二次仍错才给完整解释。\n"
     "如果用户正在练习知识点，请先清楚说明题目和评分依据；判定用户答案后，"
     "必须调用 record_answer 记录 topic_name、question、user_answer、verdict、score 和反馈。"
     "用户询问薄弱知识点或学习进度时，调用 get_weak_topics 查询后再回答；"
@@ -222,6 +224,9 @@ class ConversationEngine:
         )
         self._default_tools = tools is None
         self.tools = tools if tools is not None else self._build_tools()
+        # D17 quiz state is intentionally kept per engine/session.  Durable
+        # mastery and attempts remain in LearningRepository via record_answer.
+        self.quiz = None
 
     # ------------------------------------------------------------------
     # 按配置创建各个部件
@@ -342,7 +347,29 @@ class ConversationEngine:
         self._fed_until = self._covered_until
 
         self._started = True
+        self.quiz = self._build_quiz()
         return self.session_id
+
+    def _build_quiz(self):
+        """Create the session-scoped adaptive quiz coordinator lazily."""
+        from memory_assistant.quiz import AdaptiveQuiz
+
+        learning = getattr(self.store, "learning", None)
+        if learning is None or "record_answer" not in self.tools:
+            return None
+
+        def record_answer(**answer):
+            # Reuse the already user-bound tool.  The quiz coordinator never
+            # accepts a user_id from model or CLI input.
+            return self.tools.execute("record_answer", answer)
+
+        return AdaptiveQuiz(
+            learning,
+            self.llm,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            record_answer=record_answer,
+        )
 
     def switch_user(self, user_id: str) -> str:
         """切换到用户自己的最近会话，并清空前一用户的内存态。"""
@@ -367,6 +394,20 @@ class ConversationEngine:
         if self._default_tools:
             self.tools = self._build_tools()
         return self.start()
+
+    def start_quiz(self, topic_name: str | None = None):
+        """Start a D17 adaptive quiz question for this user/session."""
+        self._ensure_started()
+        if self.quiz is None:
+            raise RuntimeError("当前引擎没有学习工具，无法开始答题")
+        return self.quiz.start(topic_name)
+
+    def answer_quiz(self, user_answer: str):
+        """Judge the active D17 quiz answer and persist it."""
+        self._ensure_started()
+        if self.quiz is None:
+            raise RuntimeError("当前引擎没有学习工具，无法提交答案")
+        return self.quiz.answer(user_answer)
 
     def _ensure_started(self) -> None:
         if not self._started:
@@ -738,6 +779,9 @@ class ConversationEngine:
         self._covered_until = 0
         self._fed_until = 0
         self.last_error = None
+        # Forgetting clears the active question too, then recreates a fresh
+        # coordinator so the same session can immediately start another quiz.
+        self.quiz = self._build_quiz()
 
     def close(self) -> None:
         """释放资源（关闭数据库连接）。"""
