@@ -1,0 +1,31 @@
+services:
+  api:
+    build: .
+    image: memory-assistant:local
+    command: ["python", "-m", "uvicorn", "memory_assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_DIR: /app/data
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+      LLM_MODEL: "${LLM_MODEL:-deepseek-flash}"
+      LLM_TEMPERATURE: "${LLM_TEMPERATURE:-0.3}"
+      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-2048}"
+      HF_ENDPOINT: "${HF_ENDPOINT:-https://hf-mirror.com}"
+    volumes:
+      - assistant-data:/app/data
+
+  ui:
+    build: .
+    image: memory-assistant:local
+    command: ["python", "-m", "streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    ports:
+      - "8501:8501"
+    environment:
+      API_BASE_URL: http://api:8000
+    depends_on:
+      - api
+
+volumes:
+  assistant-data:

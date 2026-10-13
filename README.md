@@ -3,7 +3,7 @@
 > 一个会**真正记住你**的 AI 助手。
 >
 > 它实现了分层记忆、模型工具调用，以及计算器、当前时间和学习教练工具。
-> 当前学习教练已支持掌握度、简化 SM-2 间隔复习、`/due` 到期查询和 D17 `/quiz` 自适应答题；D18 已补充固定种子的离线选题策略评测。
+> 当前学习教练已支持掌握度、简化 SM-2 间隔复习、`/due` 到期查询和 D17 自适应答题；D18 完成固定种子的离线选题策略评测，D19 增加 FastAPI 对话接口，D20 增加 Streamlit 答题页和 Docker Compose 配置。
 
 ---
 
@@ -29,13 +29,17 @@
 | **D16** | 掌握度更新 + 简化 SM-2 间隔复习调度 | `test_learning.py` 13 项定向用例 | ✅ 已完成 |
 | **D17** | 自适应出题 + 苏格拉底式追问 + `/quiz` | `test_quiz.py`、`test_learning.py`、`test_engine.py` 共 62 passed | ✅ 已完成 |
 | **D18** | 最小版评测 + 已知局限说明 | `scripts/evaluate_adaptive_quiz.py`；固定种子离线对照 | ✅ 已完成 |
-| D19–D21 | Web、部署与收尾 | — | ⏳ |
+| **D19** | FastAPI + SSE 对话与记忆查询 | `POST /chat`、`GET /memory`；用户/会话隔离 | ✅ 已完成 |
+| **D20** | Streamlit 答题界面 + Docker | 答题卡片、学习看板、Compose 配置 | ✅ 已完成（容器构建待 Docker 环境验证） |
+| D21 | 收尾 | README 完整性、演示材料、面试话术 | ⏳ 未开始 |
 
 测试验证记录（截至 2026-10-13；历史全量基线单独标注）：
 
-- 最近一次全量测试在 D15 完成后运行：**318 passed，4 skipped**（共 322 条；离线运行）。D16–D17 完成后仍未重跑全量测试。
+- D15 后的历史全量基线：**318 passed，4 skipped**（共 322 条；离线运行），只作为历史记录。
+- D20 本轮全量测试：**333 passed，4 skipped**（共 337 条；`PYTHON_DOTENV_DISABLED=true`，未读取 `.env`、未调用真实 API）。
 - D16 定向测试：`tests/test_learning.py` **13 passed**（离线运行）。
 - D17 定向测试：`tests/test_quiz.py tests/test_learning.py tests/test_engine.py` **62 passed**（离线运行）；未调用真实 API。
+- D19 定向测试历史结果：`tests/test_api.py` **4 passed**（FakeLLM、FakeEmbeddings、临时 SQLite；未调用真实 API）。
 - D1 短期记忆：**19/19 通过**
 - D2 中期摘要：**42/42 通过**
 - D3 长期记忆基础层：集合初始化、事实写入、按 ID 读取和基础检索已完成
@@ -59,6 +63,7 @@
 - D16 学习调度：答对后连续正确次数决定间隔（1 天、3 天，之后乘当前 ease）；答错或半对会重置为 1 天并降低 ease；`get_due_reviews` 和 CLI `/due` 只返回当前用户已到期知识点。D16 的 13 项学习定向测试通过，未调用真实 API
 - D17 自适应答题：`/quiz [知识点]` 通过到期复习和薄弱知识点选择题目；首次答错只给小提示并要求重试，第二次仍错才给完整解释；每次判题都经由当前用户绑定的 `record_answer` 保存。定向测试 `tests/test_quiz.py tests/test_learning.py tests/test_engine.py` 为 62 passed，未调用真实 API。
 - D18 离线选题评测：`scripts/evaluate_adaptive_quiz.py` 用 20 条合成答题历史建立 11 个知识点快照，固定 seed `20261013` 比较随机基线和当前 `AdaptiveQuiz.start()`；随机基线薄弱覆盖率为 9/20（45%）、已掌握知识点无效出题率为 7/20（35%），自适应策略为 20/20（100%）和 0/20（0%）。这只评估选题策略，不是题目质量、答题准确率或真实用户效果。
+- D19 FastAPI：`POST /chat` 通过 SSE 返回 `meta`、`token`、`done` 或 `error`；`GET /memory` 返回用户画像、当前查询的有限相关事实命中，以及指定或最近会话的摘要/近期消息。传 `session_id` 可恢复会话；跨用户会话访问被拒绝。`user_id` 仅为数据分区字段，没有认证。默认工具调用路径的答复目前在完成后以单个 `token` 事件发送，不是模型级逐 token 流式。
 
 已就绪的基础设施：
 
@@ -71,12 +76,15 @@
 
 ## 当前架构
 
-下面描述当前代码中已经实现的运行关系。CLI 仍直接调用 `ConversationEngine`；LangGraph 是可注入引擎的编排入口。图 checkpoint 保存 LangGraph 状态，业务 SQLite 保存会话消息、摘要和学习记录，Chroma 保存长期事实向量及其检索元数据。
+下面描述当前代码中已经实现的运行关系。CLI、FastAPI 和 Streamlit 都复用 `ConversationEngine` 的业务逻辑；Streamlit 通过 FastAPI 读取学习进度并发起/提交题目。API 的活动题快照仅保存在进程内存，答题结果和掌握度写入业务 SQLite。
 
 ```mermaid
 flowchart LR
     User[用户] --> CLI[CLI]
     CLI --> Engine[ConversationEngine]
+    User --> UI[Streamlit<br/>答题卡片与进度看板]
+    UI --> API[FastAPI<br/>/chat · /memory · /learning · /quiz]
+    API --> Engine
     User --> Graph[LangGraph StateGraph<br/>可选入口]
     Graph --> Nodes[prepare → respond → finish / fail]
     Nodes --> Engine
@@ -85,7 +93,8 @@ flowchart LR
     Registry --> Builtins[计算器 / 当前时间<br/>记忆与学习工具]
     Builtins --> Engine
     Engine --> Memories[短期窗口 / 中期摘要<br/>长期事实检索与抽取]
-    Memories --> BusinessDB[(业务 SQLite<br/>sessions / messages / summaries<br/>答题记录)]
+    Memories --> BusinessDB[(业务 SQLite<br/>sessions / messages / summaries<br/>答题记录与掌握度)]
+    API -. 活动题快照 .-> QuizState[(API 单进程内存)]
     Memories --> Chroma[(Chroma<br/>长期事实向量)]
     Graph -. thread_id 状态 .-> Checkpoint[(独立 SQLite checkpointer<br/>AgentState)]
 ```
@@ -222,12 +231,73 @@ Copy-Item .env.example .env
 
 ---
 
+### 启动网页答题界面（D20）
+
+先在一个 PowerShell 窗口启动 API：
+
+```powershell
+cd D:\Agent开发
+.\.venv\Scripts\python.exe -m uvicorn memory_assistant.api:app --host 127.0.0.1 --port 8000
+```
+
+再开第二个窗口启动 Streamlit：
+
+```powershell
+cd D:\Agent开发
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+浏览器打开 `http://localhost:8501`。真实答题会调用 `.env` 里配置的模型 API；首次向量检索可能下载中文 embedding 模型。界面展示当前用户已练习知识点的掌握度、薄弱与到期计数，支持自动选题或指定知识点，并复用 D17 的“首次提示、第二次解释”流程。
+
+也可以从项目目录用 Docker Compose 一键启动 API 与网页：
+
+```powershell
+docker compose up
+```
+
+网页地址为 `http://localhost:8501`，API 文档地址为 `http://localhost:8000/docs`。Compose 通过运行时环境传递模型设置，并用命名卷保存 SQLite、Chroma 和 embedding 缓存。首次构建会安装 Python 依赖，首次模型使用还可能需要网络下载 BGE。执行 `docker compose down` 会停止服务；不要加 `-v`，否则会删除持久数据卷。
+
+尚未安装 Docker 的 Windows 用户可以在 **WSL2 中验证容器**。建议先安装 Docker Desktop，启用 WSL2 引擎，并在 Settings → Resources → WSL Integration 中启用所用的 Linux 发行版。安装完成后，在 WSL 终端进入项目目录并运行：
+
+```bash
+cd "/mnt/d/Agent开发"
+docker --version
+docker compose version
+docker compose up --build
+```
+
+看到 `api` 和 `ui` 服务保持运行后，在 Windows 浏览器访问 `http://localhost:8501` 和 `http://localhost:8000/docs`；也可另开 WSL 终端运行 `docker compose ps` 查看服务状态。首次构建需要下载依赖，首次使用真实向量模型还可能下载 BGE。没有配置 `DEEPSEEK_API_KEY` 时可以检查镜像构建、容器启动和页面/API 文档可访问性；学习看板和真实答题请求会因 API 引擎要求模型 Key 而失败。配置 Key 后再验证完整答题流程。验证结束运行 `docker compose down` 停止服务，不要加 `-v`，以保留数据卷。
+
+答题状态只缓存在 API 单进程内；重启 API 会清除未完成题目。当前配置适合单进程本地使用，不支持多 worker 间共享活动题，也没有身份认证。
+
+### D19 API 手动测试
+
+在项目目录打开一个 PowerShell 窗口启动服务：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn memory_assistant.api:app --host 127.0.0.1 --port 8000
+```
+
+服务启动后，在另一个 PowerShell 窗口请求对话。若未传 `session_id`，先从 `meta` 事件复制返回值，再带上它继续同一会话：
+
+```powershell
+curl.exe -N http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message":"我喜欢深色主题","user_id":"alice"}'
+curl.exe -N http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"message":"你记得我的主题偏好吗？","user_id":"alice","session_id":"替换成上一步的 session_id"}'
+Invoke-RestMethod "http://127.0.0.1:8000/memory?user_id=alice" | ConvertTo-Json -Depth 6
+```
+
+运行时需要在 `.env` 配置可用的模型 API Key，首次使用真实向量模型时可能需要下载模型；手动发起 `/chat` 会调用配置的模型服务。SSE 事件名为 `meta`、`token`、`done` 或 `error`。当前工具调用路径在最终答复完成后才调用引擎回调，因此完整答复作为一个 `token` 事件发送；本单元完成了 SSE 接口，但尚未实现模型级逐 token 输出。`user_id` 只用于数据分区，不是登录或身份认证。
+
 ## 目录结构
 
 ```
 learn-coach-agent/
 ├─ README.md
 ├─ requirements.txt
+├─ Dockerfile                   ← D20 Python API/UI 镜像
+├─ docker-compose.yml            ← D20 API + Streamlit 一键启动
+├─ app.py                        ← D20 Streamlit 答题与学习进度看板
+├─ .dockerignore                 ← 排除密钥、本地数据和开发缓存
 ├─ pyproject.toml               ← 打包配置 + pytest 配置
 ├─ conftest.py                  ← pytest 全局配置（修 Windows 中文乱码）
 ├─ .env.example                 ← 配置模板，复制成 .env 后填真实值
@@ -246,6 +316,7 @@ learn-coach-agent/
 │  ├─ step2_budget_experiment.py← 三种历史策略的 token 对比实验
 │  └─ export_graph.py            ← 离线导出 LangGraph Mermaid 拓扑
 ├─ src/memory_assistant/
+│  ├─ api.py                    ← D19 对话/记忆 + D20 学习看板/答题接口
 │  ├─ config.py                 ← 配置集中管理
 │  ├─ llm.py                    ← 模型客户端 + 离线假模型 FakeLLM
 │  ├─ embeddings.py             ← 向量化层：本地中文 BGE + 假向量
@@ -263,6 +334,7 @@ learn-coach-agent/
 │  ├─ cli.py / __main__.py      ← 命令行界面
 │  └─ __init__.py               ← 包入口
 ├─ tests/                       ← pytest 全量测试
+│  ├─ test_api.py               ← D19 API 与 D20 学习看板/答题状态隔离
 │  ├─ test_short_term.py        ←   19
 │  ├─ test_summary.py           ←   42
 │  ├─ test_long_term.py         ←   51

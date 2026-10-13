@@ -614,6 +614,35 @@ class LearningRepository:
             })
         return result
 
+    def get_topic_progress(self, *, user_id: str = "default") -> list[dict]:
+        """Return all topics this user has practiced, ordered by mastery."""
+        user_id = _required_text(user_id, "user_id")
+        rows = self.db.conn.execute(
+            "SELECT t.name AS topic_name, t.display_name, t.category, m.mastery, "
+            "m.attempt_count, m.correct_streak, m.interval_days, m.ease, "
+            "m.due_at, m.updated_at "
+            "FROM topic_mastery m JOIN topics t ON t.id=m.topic_id "
+            "WHERE m.user_id = ? "
+            "ORDER BY m.mastery ASC, t.name ASC",
+            (user_id,),
+        ).fetchall()
+        return [
+            {
+                "topic_name": row["topic_name"],
+                "display_name": row["display_name"],
+                "category": row["category"],
+                "mastery": round(float(row["mastery"]), 4),
+                "attempt_count": int(row["attempt_count"]),
+                "correct_streak": int(row["correct_streak"]),
+                "interval_days": round(float(row["interval_days"]), 4),
+                "ease": round(float(row["ease"]), 4),
+                "due_at": row["due_at"],
+                "updated_at": row["updated_at"],
+                "status": _mastery_status(float(row["mastery"])),
+            }
+            for row in rows
+        ]
+
 
 def _required_text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():

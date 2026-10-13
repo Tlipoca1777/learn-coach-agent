@@ -34,10 +34,11 @@ fastembed>=0.9.0
 langgraph>=1.2.0,<2
 langgraph-checkpoint-sqlite>=3.0.0,<4
 
-# --- 第 8 周：Web 界面与服务化 ---
-# fastapi>=0.115.0
-# uvicorn[standard]>=0.32.0
-# streamlit>=1.40.0
+# --- Web API（D19）---
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.32.0,<1.0
+streamlit>=1.40.0,<2.0
+requests>=2.31.0,<3.0
 
 # --- 测试与代码质量（随时可用） ---
 # pytest>=8.0.0
