@@ -3,7 +3,7 @@
 > 一个会**真正记住你**的 AI 助手。
 >
 > 它实现了分层记忆、模型工具调用，以及计算器、当前时间和学习教练工具。
-> 项目已完成 D1–D21：包含分层记忆、工具调用、LangGraph 编排、学习教练、离线策略评测、FastAPI 与 Streamlit。Docker Compose 配置已提供，容器构建和运行仍待在装有 Docker 的环境验证。
+> 项目已完成 D1–D21：包含分层记忆、工具调用、LangGraph 编排、学习教练、离线策略评测、FastAPI 与 Streamlit。Docker Compose 已完成构建和运行验证。
 
 ---
 
@@ -30,7 +30,7 @@
 | **D17** | 自适应出题 + 苏格拉底式追问 + `/quiz` | `test_quiz.py`、`test_learning.py`、`test_engine.py` 共 62 passed | ✅ 已完成 |
 | **D18** | 最小版评测 + 已知局限说明 | `scripts/evaluate_adaptive_quiz.py`；固定种子离线对照 | ✅ 已完成 |
 | **D19** | FastAPI + SSE 对话与记忆查询 | `POST /chat`、`GET /memory`；用户/会话隔离 | ✅ 已完成 |
-| **D20** | Streamlit 答题界面 + Docker | 答题卡片、学习看板、Compose 配置 | ✅ 已完成（容器构建待 Docker 环境验证） |
+| **D20** | Streamlit 答题界面 + Docker | 答题卡片、学习看板、Compose 配置 | ✅ 已完成（容器已实测运行） |
 | **D21** | 文档与交付收尾 | README、项目介绍提纲、运行说明与已知边界 | ✅ 已完成 |
 
 测试验证记录（截至 2026-10-13；历史全量基线单独标注）：
@@ -65,8 +65,8 @@
 - D17 自适应答题：`/quiz [知识点]` 通过到期复习和薄弱知识点选择题目；首次答错只给小提示并要求重试，第二次仍错才给完整解释；每次判题都经由当前用户绑定的 `record_answer` 保存。定向测试 `tests/test_quiz.py tests/test_learning.py tests/test_engine.py` 为 62 passed，未调用真实 API。
 - D18 离线选题评测：`scripts/evaluate_adaptive_quiz.py` 用 20 条合成答题历史建立 11 个知识点快照，固定 seed `20261013` 比较随机基线和当前 `AdaptiveQuiz.start()`；随机基线薄弱覆盖率为 9/20（45%）、已掌握知识点无效出题率为 7/20（35%），自适应策略为 20/20（100%）和 0/20（0%）。这只评估选题策略，不是题目质量、答题准确率或真实用户效果。
 - D19 FastAPI：`POST /chat` 通过 SSE 返回 `meta`、`token`、`done` 或 `error`；`GET /memory` 返回用户画像、当前查询的有限相关事实命中，以及指定或最近会话的摘要/近期消息。传 `session_id` 可恢复会话；跨用户会话访问被拒绝。`user_id` 仅为数据分区字段，没有认证。默认工具调用路径的答复目前在完成后以单个 `token` 事件发送，不是模型级逐 token 流式。
-- D20 Web UI：Streamlit 通过 FastAPI 提供自适应答题与学习进度看板；活动题状态只保存在 API 单进程内，未完成题会在 API 重启后丢失。Compose 编排文件已写好，容器尚未实际构建或运行。
-- D21 文档收尾：README、启动说明、评测数据和已知边界已按当前实现核对；Docker 实机验证仍待安装 Docker 后完成。
+- D20 Web UI：Streamlit 通过 FastAPI 提供自适应答题与学习进度看板；活动题状态只保存在 API 单进程内，未完成题会在 API 重启后丢失。Docker Compose 已实测构建并正常启动 API 与 UI 两个服务。
+- D21 文档收尾：README、启动说明、评测数据和已知边界已按当前实现核对；Docker 实机验证已完成。
 
 已就绪的基础设施：
 
@@ -252,15 +252,17 @@ cd D:\Agent开发
 
 浏览器打开 `http://localhost:8501`。真实答题会调用 `.env` 里配置的模型 API；首次向量检索可能下载中文 embedding 模型。界面展示当前用户已练习知识点的掌握度、薄弱与到期计数，支持自动选题或指定知识点，并复用 D17 的“首次提示、第二次解释”流程。
 
-也可以从项目目录用 Docker Compose 一键启动 API 与网页：
+也可以从项目目录用 Docker Compose 一键启动 API 与网页。首次运行建议加上 `--build`，确保使用当前源码构建镜像：
 
 ```powershell
-docker compose up
+docker compose up --build
 ```
 
 网页地址为 `http://localhost:8501`，API 文档地址为 `http://localhost:8000/docs`。Compose 通过运行时环境传递模型设置，并用命名卷保存 SQLite、Chroma 和 embedding 缓存。首次构建会安装 Python 依赖，首次模型使用还可能需要网络下载 BGE。执行 `docker compose down` 会停止服务；不要加 `-v`，否则会删除持久数据卷。
 
-尚未安装 Docker 的 Windows 用户可以在 **WSL2 中验证容器**。建议先安装 Docker Desktop，启用 WSL2 引擎，并在 Settings → Resources → WSL Integration 中启用所用的 Linux 发行版。安装完成后，在 WSL 终端进入项目目录并运行：
+#### Docker 容器验证记录
+
+本项目已在 Docker Desktop + WSL2 环境中完成 Compose 构建和运行验证。Windows 用户可在 Docker Desktop 启动后，通过已启用 WSL Integration 的发行版执行以下步骤：
 
 ```bash
 cd "/mnt/d/Agent开发"
@@ -269,7 +271,14 @@ docker compose version
 docker compose up --build
 ```
 
-看到 `api` 和 `ui` 服务保持运行后，在 Windows 浏览器访问 `http://localhost:8501` 和 `http://localhost:8000/docs`；也可另开 WSL 终端运行 `docker compose ps` 查看服务状态。首次构建需要下载依赖，首次使用真实向量模型还可能下载 BGE。没有配置 `DEEPSEEK_API_KEY` 时可以检查镜像构建、容器启动和页面/API 文档可访问性；学习看板和真实答题请求会因 API 引擎要求模型 Key 而失败。配置 Key 后再验证完整答题流程。验证结束运行 `docker compose down` 停止服务，不要加 `-v`，以保留数据卷。
+看到 `api` 和 `ui` 服务保持运行后，在 Windows 浏览器访问 `http://localhost:8501` 和 `http://localhost:8000/docs`。另开 WSL 终端可以运行下面的命令检查服务和日志：
+
+```bash
+docker compose ps
+docker compose logs --tail=100 api ui
+```
+
+确认网页、API 文档和实际答题流程均可按配置工作后，运行 `docker compose down` 停止服务。不要加 `-v`，以保留命名卷中的 SQLite、Chroma 和模型缓存。没有配置 `DEEPSEEK_API_KEY` 时仍可检查镜像构建、容器启动、网页和 API 文档；完整对话和答题需要可用的模型 Key。首次使用空的数据卷时，BGE embedding 模型可能需要联网下载。
 
 答题状态只缓存在 API 单进程内；重启 API 会清除未完成题目。当前配置适合单进程本地使用，不支持多 worker 间共享活动题，也没有身份认证。
 
@@ -464,7 +473,7 @@ learn-coach-agent/
 
 ## 项目交付物核对
 
-- [x] CLI 与 Streamlit Web UI 已实现；Docker Compose 配置已就绪，镜像构建和容器启动待 Docker 环境验证
+- [x] CLI 与 Streamlit Web UI 已实现；Docker Compose 镜像构建和容器启动已完成实测
 - [x] 四层记忆核心链路已实现并验证
 - [x] 工具调用、学习教练工具、LangGraph 编排与 SQLite checkpointer
 - [x] 学习教练业务、最小版选题评测、架构图与 README
